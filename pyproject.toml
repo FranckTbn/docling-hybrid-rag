@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docling-hybrid-rag"
+version = "0.1.0"
+description = "Le RAG de l'article : Docling, parents/enfants, BM25, BGE-M3, RRF et LangGraph."
+requires-python = ">=3.12"
+dependencies = [
+    "docling==2.121.0", "docling-core==2.92.0",
+    "langchain-core==1.6.0", "langchain-openai==1.6.0", "langgraph==1.0.8",
+    "bm25s==0.3.10", "sentence-transformers==5.7.0", "transformers==5.15.1",
+    "numpy==2.5.2", "pydantic==2.13.4", "python-dotenv==1.2.3",
+]
+
+[project.optional-dependencies]
+notebook = ["jupyterlab>=4,<5", "ipykernel>=6", "nbformat>=5", "nbclient>=0.10"]
+test = ["nbformat>=5"]
+
+[tool.setuptools.packages.find]
+include = ["lib*"]
