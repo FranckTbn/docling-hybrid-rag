@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import uuid
 
 import nbformat
@@ -40,6 +41,14 @@ class NotebookTests(unittest.TestCase):
         repository = assignments["DEPOT"].removeprefix("https://github.com/").removesuffix(".git")
         expected = f"https://colab.research.google.com/github/{repository}/blob/{assignments['REFERENCE']}/demo_colab.ipynb"
         self.assertIn(f"]({expected})", (ROOT / "README.md").read_text(encoding="utf-8"))
+        for path in ("colab_support.py", "lib/colab_worker.py"):
+            self.assertIn(f"/blob/{assignments['REFERENCE']}/{path})", CELLS["help"])
+
+    def test_reference_amounts_cannot_be_interpreted_as_math_delimiters(self):
+        # Dans Colab, plusieurs signes dollar font passer la prose en MathJax.
+        self.assertNotIn("$", CELLS["answers"])
+        for amount in ("36 516", "21 230", "15 286", "577", "559", "605", "663"):
+            self.assertIn(amount, CELLS["answers"])
 
     def test_format_syntax_clean_outputs_and_six_form_cells(self):
         nbformat.validate(nbformat.from_dict(NOTEBOOK))
@@ -118,7 +127,7 @@ class NotebookTests(unittest.TestCase):
     def test_direct_answer_inspection_has_no_retrieval_or_api_requirement(self):
         namespace = {"resultat": {"route": "direct", "retrieval": {}}}
         output = io.StringIO()
-        with redirect_stdout(output):
+        with redirect_stdout(output), patch.dict("sys.modules", {"IPython": None, "IPython.display": None}):
             exec(CELLS["inspect"], namespace)
         self.assertIn("aucun passage documentaire", output.getvalue())
 
