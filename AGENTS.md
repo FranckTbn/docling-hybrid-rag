@@ -2,20 +2,22 @@
 
 ## Objectif
 
-Ce dépôt est le compagnon exécutable de l'article de TRA Bi Néné Othniel sur le RAG documentaire. Préserver la correspondance entre théorie et code. Le README est en français et doit rester compréhensible pour un lecteur Python.
+Ce dépôt est le compagnon exécutable de l'article de TRA Bi Néné Othniel sur le RAG documentaire. Préserver la correspondance entre théorie et code. Le README est en français. Son entrée principale doit permettre à un débutant d'ouvrir Colab et de cliquer les cellules ; le parcours Python local vient ensuite.
 
 ## Stack et commandes
 
 - Python 3.12+, Docling, LangChain, LangGraph, BM25s, Sentence Transformers, NumPy.
-- Installation : `python -m pip install -e ".[notebook,test]"`.
+- Parcours public : `demo_colab.ipynb`, copie personnelle dans Drive, GPU si disponible, clé dans Colab Secrets.
+- Installation locale : `python -m pip install -e ".[notebook,test]"`.
 - Tests : `python -m unittest discover -s tests -v`.
-- Démonstration : `python -m jupyterlab demo.ipynb`.
+- Démonstration locale : `python -m jupyterlab demo.ipynb`.
 - Architecture et dépendants : `docs/ARCHITECTURE.md`.
 
 ## Conventions
 
 - Lire avant de modifier. Fonctions courtes et commentaires expliquant les choix.
 - Tout le code métier appartient à `lib`. Le notebook appelle ces fonctions et visualise.
+- `colab_support.py` orchestre la venv et le worker avec la bibliothèque standard ; ne pas installer les dépendances du RAG dans le noyau Colab ni importer la venv dans son `sys.path`.
 - Une ingestion à la fois. Sauvegarder les résultats coûteux et refuser les caches incompatibles.
 - Conserver BM25 sur les parents, BGE-M3 sur les enfants, RRF sur les parents distincts.
 - Les parents gardent les sections complètes. Les enfants gardent leurs offsets exacts.
@@ -27,6 +29,10 @@ Ce dépôt est le compagnon exécutable de l'article de TRA Bi Néné Othniel su
 
 ## Décisions
 
+- 2026-09-14. Le parcours Colab public passe par une copie Drive, quatre cellules principales et une inspection facultative, sans branches ou forks à manipuler. La clé vient de Secrets et passe au worker par son environnement, jamais par un fichier ou une sortie. Les appels OpenAI sont facturés au lecteur ; expliciter les textes et images transmis.
+- 2026-09-14. `lib/colab_worker.py` est un processus persistant dans une venv de `/content`, piloté par `colab_support.py` via JSON sur stdin/stdout, sans serveur ni tunnel. Il garde graphe et conversation ; une nouvelle conversation change le `thread_id`. CUDA sert Docling, BGE-M3 reste sur CPU. Préserver les paramètres originaux, sans les petits lots de l'essai local.
+- 2026-09-14. Le parcours Colab est préparé, sa validation complète reste à confirmer. Garder les sorties des notebooks vides et distinguer tests avec doubles, essais réels et preuves du guide. Ne pas annoncer de durée, de gain, de nombre de parents obtenu ou de GPU garanti. La copie Drive ne sauvegarde pas les artefacts temporaires ; prévoir leur export.
+- 2026-09-14. Pendant la validation, le badge Colab et `REFERENCE` ciblent ensemble `codex/colab-reader`. Avant la fusion, les basculer ensemble vers `main` après réussite du parcours réel. Une copie Drive n'exige aucune branche du lecteur.
 - 2026-09-14. Le dépôt reprend les fonctions et le prompt de l'article, avec des arguments explicites, des identifiants préfixés par le SHA-256 du PDF et des chemins relatifs dans la base.
 - 2026-09-14. `create_workflow` charge la base à la première question documentaire. Le recréer après ingestion ; une réponse directe ne charge pas la base. Depuis le routage LLM ci-dessous, elle utilise aussi la clé et le modèle.
 - 2026-09-14. `.env` est propre à chaque lecteur. La réponse dépend du modèle multimodal disponible sur son compte ; le modèle est configurable.

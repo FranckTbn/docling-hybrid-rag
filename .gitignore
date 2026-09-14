@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 .venv/
+.venv-colab/
 __pycache__/
 *.py[cod]
 *.egg-info/

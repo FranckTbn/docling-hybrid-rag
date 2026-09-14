@@ -4,7 +4,36 @@ Le code à exécuter pour accompagner l'article **Construire un RAG documentaire
 
 Les fonctions reprennent son pipeline : Docling conserve la structure, les parents regroupent les sections, les enfants servent à la recherche dense. BM25 recherche les parents et BGE-M3 les enfants. RRF combine les classements au niveau des parents. Le LLM choisit de répondre directement ou de rechercher 3, 5 ou 7 parents. Il reçoit les parents retenus avec leurs images et répond avec des citations lisibles.
 
-## Démarrer
+## Tester dans Google Colab
+
+[![Ouvrir dans Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FranckTbn/docling-hybrid-rag/blob/codex/colab-reader/demo_colab.ipynb)
+
+**Version d'essai, validation complète sur Colab à confirmer.** Le bouton ouvre la branche d'essai préparée par l'auteur ; le lecteur n'a aucune branche à créer. Les étapes ci-dessous ne constituent pas encore une preuve d'ingestion ou de réponse réussie dans Colab.
+
+Ouvrir le notebook avec le bouton, puis **enregistrer une copie dans son Drive personnel** pour pouvoir modifier les questions. Tout se déroule dans le navigateur, sans installation locale ni manipulation de branches ou de forks GitHub.
+
+Avant d'exécuter les cellules, choisir **Exécution > Modifier le type d'exécution > GPU**, puis **T4 si disponible**. L'accès à un GPU dépend des ressources et des limites du compte Colab. Si aucun GPU n'est attribué, le contrôle du notebook doit le signaler avant l'ingestion.
+
+Exécuter ensuite les quatre cellules principales dans l'ordre :
+
+| Cellule | Action du lecteur | Rôle |
+|---|---|---|
+| 1. Installer | Cliquer sur Exécuter et attendre la fin | Préparer automatiquement l'environnement Python isolé nécessaire à l'exécution du RAG dans la machine Colab. Aucun redémarrage manuel du noyau n'est prévu. |
+| 2. Configurer la clé | Dans **Secrets**, ajouter `OPENAI_API_KEY`, autoriser son accès au notebook, puis exécuter la cellule | Lire la clé sans l'afficher et effectuer un appel de contrôle avec le modèle choisi dans le formulaire. |
+| 3. Ingérer le PDF | Exécuter la cellule avec le document public prérempli | Télécharger et ingérer les 30 pages de l'appendice actuariel de Retraite Québec. Attendre la confirmation de fin avant de poser une question. |
+| 4. Poser une question | Modifier le champ du formulaire, puis exécuter | Interroger le document et afficher la réponse avec ses sources. |
+
+Le modèle par défaut est `gpt-5.6-luna`. Le formulaire permet d'en choisir un autre accessible sur son compte, compatible avec **l'API Responses, le raisonnement, les images et la sortie JSON stricte**. Le test de connexion permet de repérer un problème d'accès avant l'ingestion ; il ne valide pas à lui seul la qualité des réponses documentaires.
+
+La cellule 4 peut être rejouée avec une nouvelle question. Conserver la même conversation pour une relance comme « Et quelle condition limite ce transfert ? ». Cocher **Nouvelle conversation** pour un contrôle indépendant. La cellule 5, facultative, permet d'examiner le contexte transmis et les classements de recherche.
+
+Le document d'exemple est [Calcul des rentes de Pierre et de Marie, appendice technique de la consultation de 2009](https://www.retraitequebec.gouv.qc.ca/sites/default/files/SiteCollectionDocuments/RetraiteQuebec/fr/publications/nos-programmes/regime-de-rentes/consultation-publique/cp_etude_impact_part2.pdf). Il illustre des calculs historiques, pas les règles actuelles du régime de retraite. Pour essayer un autre PDF numérique public, adapter sa source, son titre et la question dans les formulaires. L'OCR reste désactivé.
+
+**Les appels OpenAI sont payants sur le compte du lecteur.** Ils comprennent le test de connexion, le routage et les réponses. Pour une question documentaire, le texte et les images des parents retenus sont transmis à OpenAI. La clé doit rester dans Secrets, jamais dans une cellule, une sortie ou un fichier partagé. Le parsing Docling utilise CUDA dans ce parcours ; BGE-M3 reste sur CPU, comme dans le code de l'article. Les modèles et les paramètres du pipeline original sont conservés, sans appliquer les petits lots de l'essai local.
+
+Colab exécute le notebook sur une **machine privée et temporaire**. La copie dans Drive sauvegarde le notebook, pas automatiquement le PDF, les index ou les résultats présents dans la machine. Utiliser l'export facultatif du notebook pour récupérer les artefacts avant la suppression du runtime. La mémoire de conversation disparaît à l'arrêt du processus. Une nouvelle machine nécessite de refaire l'installation et l'ingestion. [Fonctionnement des machines Colab](https://research.google.com/colaboratory/faq.html)
+
+## Utiliser le notebook en local
 
 Python **3.12 ou supérieur**, Git et un environnement virtuel sont nécessaires. Le notebook se lance depuis la racine du dépôt.
 
@@ -28,7 +57,7 @@ Ne jamais mettre sa clé dans le notebook. `.env`, les documents et les résulta
 
 Le premier parsing enrichi peut être long, particulièrement sur le guide de 87 pages. Il télécharge aussi les modèles Docling et BGE-M3. Commencer avec un petit PDF numérique permet de vérifier l'installation. Prévoir plusieurs Go libres ; sur une machine avec 8 Go de RAM, exécuter une ingestion à la fois. Le profil reprend l'article et désactive l'OCR : les PDF scannés ne sont pas la cible de cette première version.
 
-## 1. Enrichir la base
+### 1. Enrichir la base
 
 ```python
 from lib import ingest_document
@@ -49,7 +78,7 @@ Une autre ingestion ajoute un document sans remplacer les précédents. Le SHA-2
 
 Le dossier `data/documents/<sha256>/` conserve le PDF source, `document.json`, ses images dans `artifacts`, les parents/enfants dans `chunks.json`, les vecteurs dans `children-embeddings.npz` et les informations de reprise dans `record.json`. L'index BM25 de l'ensemble des parents est sauvegardé dans `data/indexes/bm25`. `data/manifest.json` liste les documents et l'index disponibles. Les chemins internes sont relatifs pour déplacer cette base avec le projet.
 
-## 2. Poser une question avec LangGraph
+### 2. Poser une question avec LangGraph
 
 ```python
 from lib import create_workflow
@@ -86,7 +115,7 @@ La clé API est désormais utilisée dès le routage, y compris pour une salutat
 
 `result["context"]` permet de voir les parents transmis ; `result["sources"]` contient les références effectivement citées. Le notebook affiche le Markdown, les tableaux, les formules et les images du contexte.
 
-## 3. Examiner la recherche indépendamment du modèle
+### 3. Examiner la recherche indépendamment du modèle
 
 ```python
 from lib import load_knowledge_base, hybrid_retrieval, build_context
@@ -120,11 +149,11 @@ python -m unittest discover -s tests -v
 
 Les tests hors ligne exercent les identifiants, la reprise d'ingestion, les frontières des enfants, RRF, la provenance et les branches du vrai graphe avec un modèle de test. Ils n'établissent pas la qualité actuarielle d'une réponse. Les résultats réels du guide sont vérifiés séparément par rapport à l'article ; ils ne sont pas distribués comme réponses universelles.
 
-La vérification locale sur le guide retrouve les mêmes 128 parents, 195 enfants, trois parents RRF, images et références que l'article, en réutilisant ses résultats de parsing et d'encodage. Une génération réelle a aussi montré une imprécision sur la MSEP, commentée dans l'article : des références valides ne suffisent pas à garantir une interprétation correcte.
+La vérification locale sur le guide retrouve les mêmes 128 parents, 195 enfants, trois parents RRF, images et références que l'article, en réutilisant ses résultats de parsing et d'encodage. Cette preuve concerne le guide de l'article, pas le nouveau PDF du parcours Colab. Une génération réelle a aussi montré une imprécision sur la MSEP, commentée dans l'article : des références valides ne suffisent pas à garantir une interprétation correcte.
 
-Les figures accompagnent les parents retenus, mais ne sont pas indexées par leurs pixels. RRF favorise l'accord entre moteurs et ne garantit pas que les parents choisis suffisent. Le routeur peut se tromper de branche ou de budget ; tester ses décisions sur ses propres questions. Les liens indiquent la section ou l'objet et les pages ; ils ne prouvent pas que chaque affirmation est exacte. Pour un PDF local, la citation ouvre sa copie locale, pas une URL publique.
+Les figures accompagnent les parents retenus, mais ne sont pas indexées par leurs pixels. RRF favorise l'accord entre moteurs et ne garantit pas que les parents choisis suffisent. Le routeur peut se tromper de branche ou de budget ; tester ses décisions sur ses propres questions. Les liens indiquent la section ou l'objet et les pages ; ils ne prouvent pas que chaque affirmation est exacte. Pour un PDF local, la citation désigne sa copie locale ; son ouverture doit être vérifiée dans l'interface utilisée.
 
-Cette première version est prévue pour un utilisateur local, des PDF numériques et une ingestion à la fois. Elle n'inclut ni serveur, ni base vectorielle distante, ni reranker. Aucun document source ni clé privée n'est publié dans ce dépôt.
+Cette première version est prévue pour un lecteur à la fois, des PDF numériques et une ingestion à la fois. Le parcours Colab prépare un processus Python isolé, sans serveur ni tunnel ; le notebook local reste disponible. Le projet n'inclut ni base vectorielle distante ni reranker. Aucun document source ni clé privée n'est publié dans ce dépôt.
 
 ## Références
 
