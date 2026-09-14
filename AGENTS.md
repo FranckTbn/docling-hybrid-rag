@@ -28,5 +28,8 @@ Ce dépôt est le compagnon exécutable de l'article de TRA Bi Néné Othniel su
 ## Décisions
 
 - 2026-09-14. Le dépôt reprend les fonctions et le prompt de l'article, avec des arguments explicites, des identifiants préfixés par le SHA-256 du PDF et des chemins relatifs dans la base.
-- 2026-09-14. `create_workflow` charge la base à la première question documentaire. Le recréer après ingestion ; une salutation ne charge ni clé ni modèle.
+- 2026-09-14. `create_workflow` charge la base à la première question documentaire. Le recréer après ingestion ; une réponse directe ne charge pas la base. Depuis le routage LLM ci-dessous, elle utilise aussi la clé et le modèle.
 - 2026-09-14. `.env` est propre à chaque lecteur. La réponse dépend du modèle multimodal disponible sur son compte ; le modèle est configurable.
+- 2026-09-14. Le routeur LLM remplace la liste déterministe de salutations. Sortie structurée `RouteDecision` : direct/retrieve, 3/5/7 parents pour retrieve, question autonome et motif court. Le retrieval garde ses 20 candidats par canal ; seul le budget final varie. Ne pas présenter cette politique comme un optimum mesuré.
+- 2026-09-14. `InMemorySaver` avec `thread_id` obligatoire. Le champ `messages` garde trois messages utilisateur/assistant au total, sans prompts ni images ; les anciens checkpoints peuvent rester en RAM. Réutiliser le graphe pour continuer, changer l'identifiant pour isoler, recréer le graphe pour oublier. Les réponses passées servent à comprendre les relances, jamais comme sources documentaires.
+- 2026-09-14. Vérification du workflow : 26 tests locaux réussis, dont la parité sur le vrai guide. Des appels réels au modèle configuré ont choisi 3 pour MSEP, 5 pour expliquer Mack, 7 pour une comparaison ; la relance sur Mack et le prénom conservé sur deux tours ont été vérifiés. Ces exemples ne constituent pas un benchmark du routeur.

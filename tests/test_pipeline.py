@@ -18,6 +18,7 @@ from lib.answer import SourcedAnswer, validate_answer, make_answer_messages, cit
 from lib.context import parent_content_blocks
 from lib.retrieval import fuse_parents, rank_dense_parents
 from lib.storage import read_json, write_json
+from tests.test_workflow import ScriptedLLM, decision, conversation
 
 
 class WordTokenizer:
@@ -126,6 +127,24 @@ class PipelineTests(unittest.TestCase):
         self.assertLessEqual(len(context["parents"]), 3)
         self.assertEqual(context["parents"][0]["text"], base.parents_by_id[hits["parent_ids"][0]].page_content)
 
+    def test_hybrid_returns_three_five_or_seven_distinct_ranked_parents(self):
+        # Huit vrais parents indexés permettent de vérifier le découpage après RRF.
+        doc = sample_document()
+        prov = doc.texts[0].prov[0]
+        for number in range(7):
+            heading = doc.add_heading(text=f"Mack section {number}", level=1, prov=prov)
+            doc.add_text(label=DocItemLabel.TEXT, text=f"Mack provisions hypothèse {number}",
+                         prov=prov, parent=heading)
+        self.parse.side_effect = lambda *args: doc
+        self.ingest()
+        base = load_knowledge_base(self.data)
+        complete = hybrid_retrieval("Mack provisions", base, encoder=FakeEncoder(), context_k=8)
+        self.assertEqual(len(complete["parent_ids"]), 8)
+        for budget in (3, 5, 7):
+            result = hybrid_retrieval("Mack provisions", base, encoder=FakeEncoder(), context_k=budget)
+            self.assertEqual(result["parent_ids"], complete["parent_ids"][:budget])
+            self.assertEqual(len(set(result["parent_ids"])), budget)
+
     def test_modified_canonical_document_cannot_supply_old_index_citations(self):
         result = self.ingest()
         path = Path(result["directory"]) / "document.json"
@@ -139,32 +158,33 @@ class PipelineTests(unittest.TestCase):
             base = load_knowledge_base(self.data)
         self.assertGreater(len(base.parents), 0)
 
-    def test_graph_direct_branch_needs_neither_key_nor_base(self):
-        with patch("lib.workflow.get_llm", side_effect=AssertionError("appel modèle interdit")):
-            with patch("lib.workflow.load_knowledge_base", side_effect=AssertionError("lecture interdite")):
-                result = create_workflow(self.data).invoke({"question": "Bonjour !"})
-        self.assertEqual(result["route"], "direct")
-        self.assertEqual(result["sources"], {})
-        self.assertIn("Bonjour", result["answer"])
-
     def test_graph_rag_branch_uses_real_retrieval_and_citations(self):
         self.ingest()
         base = load_knowledge_base(self.data)
         parent_id = base.parents[0].metadata["parent_id"]
         response = SourcedAnswer(paragraphs=[{"text": "Mack mesure la variance des provisions.",
                                               "source_ids": [parent_id]}], missing_information="")
-        fake_llm = SimpleNamespace(with_structured_output=lambda *a, **k: SimpleNamespace(
-            invoke=lambda messages: {"parsed": response, "parsing_error": None,
-                                     "raw": SimpleNamespace(response_metadata={})}))
+        fake_llm = ScriptedLLM(
+            routes=[decision("retrieve", 5, "Comment Mack mesure la variance des provisions ?"),
+                    decision("direct", 3, "merci")],
+            answers=[response], direct_answers=["Avec plaisir !"],
+        )
         graph = create_workflow(self.data, llm=fake_llm, encoder=FakeEncoder())
-        result = graph.invoke({"question": "Comment Mack mesure la variance des provisions ?"})
-        self.assertEqual(result["route"], "rag")
+        config = conversation("guide")
+        result = graph.invoke({"question": "Comment Mack mesure la variance des provisions ?"}, config)
+        self.assertEqual(result["route"], "retrieve")
+        self.assertEqual(result["context_k"], 5)
         self.assertIn("Méthode de Mack", result["answer"])
         self.assertIn("#page=1", result["answer"])
         self.assertNotIn(parent_id, result["answer"])
         self.assertEqual(set(result["sources"]), {parent_id})
-        direct = graph.invoke({"question": "merci"})
+        self.assertEqual(result["messages"][-1].content, result["answer"])
+        direct = graph.invoke({"question": "merci"}, config)
         self.assertEqual(direct["context"]["parents"], [])
+        self.assertEqual(direct["sources"], {})
+        self.assertEqual(direct["retrieval"], {})
+        self.assertEqual(direct["context_k"], 0)
+
 
 
 class ContractTests(unittest.TestCase):

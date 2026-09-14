@@ -2,7 +2,7 @@
 
 Le code à exécuter pour accompagner l'article **Construire un RAG documentaire pour l’assurance** de TRA Bi Néné Othniel. L'article explique les choix ; ce dépôt permet de les essayer sur un PDF avec sa propre clé API.
 
-Les fonctions reprennent son pipeline : Docling conserve la structure, les parents regroupent les sections, les enfants servent à la recherche dense. BM25 recherche les parents et BGE-M3 les enfants. RRF combine les classements au niveau des parents. Le modèle reçoit les trois parents retenus avec leurs images et répond avec des citations lisibles.
+Les fonctions reprennent son pipeline : Docling conserve la structure, les parents regroupent les sections, les enfants servent à la recherche dense. BM25 recherche les parents et BGE-M3 les enfants. RRF combine les classements au niveau des parents. Le LLM choisit de répondre directement ou de rechercher 3, 5 ou 7 parents. Il reçoit les parents retenus avec leurs images et répond avec des citations lisibles.
 
 ## Démarrer
 
@@ -55,18 +55,36 @@ Le dossier `data/documents/<sha256>/` conserve le PDF source, `document.json`, s
 from lib import create_workflow
 
 rag = create_workflow(data_dir="data", env_path=".env")
-result = rag.invoke({"question": "Comment la méthode de Mack mesure-t-elle l'incertitude des provisions ?"})
+# Le même identifiant permet de poursuivre cette conversation.
+config = {"configurable": {"thread_id": "ma-conversation"}}
+result = rag.invoke(
+    {"question": "Comment la méthode de Mack mesure-t-elle l'incertitude des provisions ?"}, config
+)
 print(result["answer"])
 ```
 
-Le graphe suit deux branches :
+Le LLM lit les trois derniers messages et choisit une branche :
 
-- Une salutation explicite reçoit une réponse directe, sans clé API, recherche ou modèle.
-- Toute question documentaire ou ambiguë déclenche la recherche, la construction du contexte et la réponse sourcée.
+- `direct` pour une conversation ou une demande sans preuve documentaire. Le modèle répond sans charger la base.
+- `retrieve` pour une question documentaire. Le modèle choisit aussi le nombre de parents : 3 pour une demande ciblée, 5 pour une explication plus large, 7 pour une comparaison ou une synthèse. RRF détermine ensuite quels parents retourner.
 
-Ce routeur reprend volontairement la règle simple de l'article. Ce n'est ni un classificateur universel d'intention ni un assistant conversationnel avec mémoire. Chaque `invoke` traite une question indépendante.
+La décision est structurée et validée : aucune autre branche ni aucun autre budget n'est accepté. `result["route_reason"]` expose un motif court et `result["context_k"]` indique le budget demandé, ou 0 pour une réponse directe. Il peut y avoir moins de parents si les candidats sont insuffisants. Ce choix adaptatif est une règle de départ à évaluer, pas un optimum démontré.
 
-La base et l'index BM25 sont chargés à la première question documentaire, puis réutilisés. Recréer `rag` après une nouvelle ingestion pour prendre en compte les nouveaux documents. `result["context"]` permet de voir les parents transmis ; `result["sources"]` contient les références effectivement citées. Le notebook affiche le Markdown, les tableaux, les formules et les images du contexte.
+```python
+suite = rag.invoke({"question": "Et quelles sont ses limites ?"}, config)
+print(suite["answer"])
+print(suite["route"], suite["context_k"], suite["route_reason"])
+```
+
+Le routeur utilise l'historique pour reformuler une relance en question autonome, visible dans `result["search_question"]`. Cette question sert à la recherche et à la réponse sourcée. Les anciennes réponses ne deviennent pas des preuves ; seules les sources retrouvées pour le tour courant peuvent être citées.
+
+`InMemorySaver` conserve l'état de chaque conversation dans la RAM du processus Python. Le champ `messages` garde **trois messages au total**, questions et réponses confondues, et non trois échanges complets. Après une réponse, il peut donc commencer par un message assistant. À la question suivante, le routeur voit le dernier échange et la nouvelle question. Les prompts système et les images n'entrent pas dans cette fenêtre. Un sujet plus ancien peut être oublié ; il faut alors le repréciser.
+
+Réutiliser le même graphe et le même `thread_id` pour continuer, ou changer d'identifiant pour une conversation séparée. La mémoire disparaît avec le processus ou un nouveau graphe. Les anciens checkpoints peuvent rester en RAM jusqu'à cette fermeture ; la limite de trois porte sur le champ `messages` courant et l'historique envoyé au modèle. Aucun serveur supplémentaire n'est nécessaire.
+
+La clé API est désormais utilisée dès le routage, y compris pour une salutation. Un tour normal effectue un appel pour décider puis un autre pour répondre. La base et l'index BM25 restent chargés seulement à la première recherche, puis réutilisés. Recréer `rag` après une nouvelle ingestion pour actualiser les index et démarrer une nouvelle mémoire.
+
+`result["context"]` permet de voir les parents transmis ; `result["sources"]` contient les références effectivement citées. Le notebook affiche le Markdown, les tableaux, les formules et les images du contexte.
 
 ## 3. Examiner la recherche indépendamment du modèle
 
@@ -78,7 +96,7 @@ hits = hybrid_retrieval("Comment calculer l'incertitude avec Mack ?", base)
 context = build_context(hits["parent_ids"], base)
 ```
 
-BM25 est construit pendant l'ingestion sur l'ensemble des parents, avec les stopwords français pour le corpus et les questions, puis sauvegardé. Les deux index sont rechargés sans réencodage ; seule une nouvelle question est encodée. Les vingt candidats de chaque canal sont ramenés à des parents distincts avant RRF (constante 60). Un parent dense garde son meilleur enfant. Le contexte contient au plus trois parents, avec toutes leurs figures conservées.
+BM25 est construit pendant l'ingestion sur l'ensemble des parents, avec les stopwords français pour le corpus et les questions, puis sauvegardé. Les deux index sont rechargés sans réencodage ; seule une nouvelle question est encodée. Les vingt candidats de chaque canal sont ramenés à des parents distincts avant RRF (constante 60). Un parent dense garde son meilleur enfant. L'appel direct à `hybrid_retrieval` garde par défaut trois parents, avec toutes leurs figures conservées. Dans le workflow, le LLM transmet son choix de 3, 5 ou 7 via `context_k`.
 
 ## Correspondance avec l'article
 
@@ -92,7 +110,7 @@ BM25 est construit pendant l'ingestion sur l'ensemble des parents, avec les stop
 | Prompt, réponse structurée, citations | `lib/answer.py` |
 | Preuve nécessaire, branches et `invoke` | `lib/workflow.py` |
 
-Les adaptations concernent les arguments des fonctions, les identifiants distincts entre PDF, les chemins portables et la persistance. Les budgets de l'article restent inchangés : enfants autour de 400 tokens, sections entières comme parents, 20 candidats par canal et 3 parents restitués. Les tableaux et formules ne sont pas coupés : 400 est une cible souple, pas une limite stricte ni un optimum démontré.
+Les adaptations concernent les arguments des fonctions, les identifiants distincts entre PDF, les chemins portables et la persistance. Le parsing, les sections entières comme parents, les enfants autour de 400 tokens et les 20 candidats par canal restent ceux de l'article. Le workflow ajoute un routeur LLM et une mémoire courte ; son budget de 3, 5 ou 7 parents prolonge la démonstration de l'article à trois parents fixes. Les tableaux et formules ne sont pas coupés : 400 est une cible souple, pas une limite stricte ni un optimum démontré.
 
 ## Vérifications et limites
 
@@ -104,7 +122,7 @@ Les tests hors ligne exercent les identifiants, la reprise d'ingestion, les fron
 
 La vérification locale sur le guide retrouve les mêmes 128 parents, 195 enfants, trois parents RRF, images et références que l'article, en réutilisant ses résultats de parsing et d'encodage. Une génération réelle a aussi montré une imprécision sur la MSEP, commentée dans l'article : des références valides ne suffisent pas à garantir une interprétation correcte.
 
-Les figures accompagnent les parents retenus, mais ne sont pas indexées par leurs pixels. RRF favorise l'accord entre moteurs et ne garantit pas que les trois parents suffisent. Les liens indiquent la section ou l'objet et les pages ; ils ne prouvent pas que chaque affirmation est exacte. Pour un PDF local, la citation ouvre sa copie locale, pas une URL publique.
+Les figures accompagnent les parents retenus, mais ne sont pas indexées par leurs pixels. RRF favorise l'accord entre moteurs et ne garantit pas que les parents choisis suffisent. Le routeur peut se tromper de branche ou de budget ; tester ses décisions sur ses propres questions. Les liens indiquent la section ou l'objet et les pages ; ils ne prouvent pas que chaque affirmation est exacte. Pour un PDF local, la citation ouvre sa copie locale, pas une URL publique.
 
 Cette première version est prévue pour un utilisateur local, des PDF numériques et une ingestion à la fois. Elle n'inclut ni serveur, ni base vectorielle distante, ni reranker. Aucun document source ni clé privée n'est publié dans ce dépôt.
 
@@ -115,6 +133,7 @@ Cette première version est prévue pour un utilisateur local, des PDF numériqu
 - [BGE-M3](https://huggingface.co/BAAI/bge-m3)
 - [BM25s](https://github.com/xhluca/bm25s)
 - [RRF, Cormack et al.](https://research.google/pubs/reciprocal-rank-fusion-outperforms-condorcet-and-individual-rank-learning-methods/)
-- [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview)
+- [LangGraph, routage par LLM](https://docs.langchain.com/oss/python/langgraph/thinking-in-langgraph)
+- [LangGraph, mémoire et identifiants de conversation](https://docs.langchain.com/oss/python/langgraph/persistence)
 
 Le code est sous licence MIT. Les PDF utilisés restent soumis aux droits de leurs auteurs.
