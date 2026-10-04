@@ -1,5 +1,7 @@
 """Routage simulé, vrai graphe et vrais checkpoints, sans coût API."""
 
+import threading
+import time
 import unittest
 from html import unescape
 from types import SimpleNamespace
@@ -122,6 +124,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([theme["sub_question"] for theme in themes], questions)
         shared = next(p for p in result["context"]["parents"] if p["parent_id"] == "commun")
         self.assertEqual(shared["themes"], questions)
+
+    def test_parallel_branches_never_use_the_shared_models_at_the_same_time(self):
+        # Régression : les tokenizers Hugging Face lèvent « Already borrowed » si deux
+        # branches appellent le même reranker en même temps.
+        active, overlaps, lock = [0], [], threading.Lock()
+
+        def guarded_search(query, kb, **kwargs):
+            with lock:
+                active[0] += 1
+                overlaps.append(active[0])
+            time.sleep(0.05)
+            with lock:
+                active[0] -= 1
+            return search_result([f"{query}-p"])
+
+        llm = ScriptedLLM([decision("retrieve", 7, "Compare A, B et C", ["A ?", "B ?", "C ?"])])
+        self.run_retrieval(llm, "Compare A, B et C", search=guarded_search)
+        self.assertEqual(max(overlaps), 1)
 
     def test_low_relevance_rewrites_once_then_declares_the_theme_without_passage(self):
         llm = ScriptedLLM([decision("retrieve", 3, "Qu'est-ce que l'IBNR ?")], rewrites=[{"query": "sinistres survenus non déclarés"}])

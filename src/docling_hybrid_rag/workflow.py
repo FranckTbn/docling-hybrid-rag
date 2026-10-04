@@ -7,6 +7,7 @@
 4. Un contrôle vérifie que chaque paragraphe est soutenu et ajoute une alerte au message.
 """
 
+import threading
 from pathlib import Path
 from typing import Annotated, Literal, TypedDict
 
@@ -134,6 +135,10 @@ def create_workflow(knowledge_dir: str | Path = "data/knowledge", *, env_path: s
     if relevance_threshold is not None and reranker is None:
         raise ValueError("Un seuil de pertinence demande un reranker pour noter les passages.")
     knowledge, chat, vectorizer = None, llm, encoder
+    # Les branches parallèles partagent l'encodeur et le reranker. Leurs tokenizers
+    # Hugging Face refusent deux appels simultanés (« Already borrowed ») : les calculs
+    # sur les modèles passent donc un par un, les appels au LLM restent parallèles.
+    models_lock = threading.Lock()
 
     def model_client():
         nonlocal chat
@@ -187,15 +192,17 @@ def create_workflow(knowledge_dir: str | Path = "data/knowledge", *, env_path: s
     def search_theme(task):
         query, vector, rewrites = task["sub_question"], np.asarray(task["vector"]), []
         while True:
-            hits = hybrid_retrieval(query, knowledge, question_vector=vector, reranker=reranker,
-                                    thesaurus=thesaurus, policy=policy, context_k=task["budget"])
+            with models_lock:
+                hits = hybrid_retrieval(query, knowledge, question_vector=vector, reranker=reranker,
+                                        thesaurus=thesaurus, policy=policy, context_k=task["budget"])
             relevant = relevance_threshold is None or (
                 hits["best_score"] is not None and hits["best_score"] >= relevance_threshold)
             if relevant or len(rewrites) >= max_rewrites:
                 break
             query = rewrite_query(model_client(), task["sub_question"], query)
             rewrites.append(query)
-            vector = encode([query])[0]
+            with models_lock:
+                vector = encode([query])[0]
         parent_ids = hits["parent_ids"] if relevant else []
         return {"themes": [{
             "index": task["index"], "sub_question": task["sub_question"], "query": query,
