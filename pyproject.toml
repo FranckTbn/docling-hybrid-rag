@@ -1,22 +1,31 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "docling-hybrid-rag"
-version = "0.1.0"
-description = "Le RAG de l'article : Docling, parents/enfants, BM25, BGE-M3, RRF et LangGraph."
+version = "0.2.0"
+description = "RAG documentaire : Docling, parents/enfants, BM25, BGE-M3, RRF et réponse sourcée."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "TRA Bi Néné Othniel" }]
 requires-python = ">=3.12"
+# Bornes basses = versions testées. Pas de version figée : le package doit
+# pouvoir s'installer dans l'environnement existant d'un lecteur.
 dependencies = [
-    "docling==2.121.0", "docling-core==2.92.0",
-    "langchain-core==1.6.0", "langchain-openai==1.6.0", "langgraph==1.0.8",
-    "bm25s==0.3.10", "sentence-transformers==5.7.0", "transformers==5.15.1",
-    "numpy==2.5.2", "pydantic==2.13.4", "python-dotenv==1.2.3",
+    "docling>=2.121,<3", "docling-core>=2.92,<3",
+    "langchain-core>=1.6,<2", "langchain-openai>=1.6,<2", "langgraph>=1.0.8,<2",
+    "bm25s>=0.3.10,<0.4", "PyStemmer>=3.1,<4", "sentence-transformers>=5.7,<6", "transformers>=5.15,<6",
+    "numpy>=2.5,<3", "pydantic>=2.13,<3", "python-dotenv>=1.2,<2",
 ]
+
+[project.urls]
+Repository = "https://github.com/FranckTbn/docling-hybrid-rag"
 
 [project.optional-dependencies]
 notebook = ["jupyterlab>=4,<5", "ipykernel>=6", "nbformat>=5", "nbclient>=0.10"]
 test = ["nbformat>=5"]
 
 [tool.setuptools.packages.find]
-include = ["lib*"]
+where = ["src"]

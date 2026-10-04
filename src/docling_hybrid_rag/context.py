@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from docling_core.types.doc import RefItem
 
-from lib.parsing import load_document
+from docling_hybrid_rag.parsing import load_document
 
 
 def parent_content_blocks(parent):
@@ -66,7 +66,7 @@ def build_context(parent_ids, knowledge_base):
         parent = knowledge_base.parents_by_id[parent_id]
         meta = parent.metadata
         document_id = meta["document_id"]
-        path = knowledge_base.data_dir / meta["document_path"]
+        path = knowledge_base.knowledge_dir / meta["document_path"]
         if document_id not in documents:
             documents[document_id] = load_document(path)
         doc = documents[document_id]

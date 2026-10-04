@@ -1,0 +1,90 @@
+"""Ajouter un PDF à la base. Une étape déjà faite avec les mêmes entrées est réutilisée."""
+
+from importlib.metadata import version
+from pathlib import Path
+
+import numpy as np
+
+from docling_hybrid_rag.indexing import save_lexical_index
+from docling_hybrid_rag.settings import get_encoder, get_tokenizer, EMBEDDING_MODEL_ID, DENSE_REVISION, CHILD_MAX_TOKENS
+from docling_hybrid_rag.storage import load_chunks, load_vectors
+from docling_hybrid_rag.store import (
+    CATALOG, add_source, code_fingerprint, file_sha256, read_catalog, record_stage, stage_problem, write_json,
+)
+
+CHUNKING = "chunking"
+EMBEDDINGS = "embeddings"
+
+
+def _namespace_chunks(parents, children, document_id, title):
+    # Un self_ref Docling est local à un document. Les identifiants d'index doivent être globaux.
+    for item in [*parents, *children]:
+        meta = item.metadata
+        meta["document_id"] = document_id
+        meta["document_path"] = f"documents/{document_id}/document.json"
+        meta["document_title"] = title
+        meta["parent_id"] = f'{document_id}:{meta["parent_id"]}'
+        if "child_id" in meta:
+            meta["child_id"] = f'{document_id}:{meta["child_id"]}'
+
+
+def ingest_document(source: str | Path, knowledge_dir: str | Path = "data/knowledge", *,
+                    title: str | None = None, pdf_options=None):
+    """Parser, découper et indexer un PDF, puis le rendre interrogeable."""
+    from docling_hybrid_rag import chunking
+    from docling_hybrid_rag.parsing import (
+        PARSING, build_document_converter, load_parsed_document, parse_document, parsing_inputs,
+        save_parsed_document,
+    )
+
+    root = Path(knowledge_dir).resolve()
+    directory = add_source(source, root, title=title)
+    document_id = directory.name
+    title = read_catalog(root)["documents"][document_id]["title"]
+
+    if stage_problem(directory, PARSING, parsing_inputs(directory, pdf_options)):
+        doc = parse_document(directory / "source.pdf", build_document_converter(pdf_options))
+        save_parsed_document(doc, directory, pdf_options)
+    doc = load_parsed_document(directory, pdf_options)
+
+    # Chaque étape dépend de l'empreinte du fichier produit par la précédente :
+    # un nouveau parsing invalide donc les chunks, puis les embeddings.
+    chunking_inputs = {
+        "document_sha256": file_sha256(directory / "document.json"), "title": title,
+        "tokenizer": {"model": EMBEDDING_MODEL_ID, "revision": DENSE_REVISION, "max_tokens": CHILD_MAX_TOKENS},
+        "versions": {name: version(name) for name in ("docling-core", "transformers")},
+        "code": code_fingerprint(chunking, _namespace_chunks),
+    }
+    if stage_problem(directory, CHUNKING, chunking_inputs):
+        parents, children = chunking.build_parent_child_chunks(doc, get_tokenizer())
+        if not parents or not children:
+            raise ValueError("Aucun chunk textuel exploitable dans ce PDF.")
+        _namespace_chunks(parents, children, document_id, title)
+        write_json(directory / "chunks.json", {
+            "parents": [p.model_dump() for p in parents], "children": [c.model_dump() for c in children],
+        })
+        record_stage(directory, CHUNKING, chunking_inputs, ["chunks.json"])
+    parents, children = load_chunks(directory)
+
+    embedding_inputs = {
+        "chunks_sha256": file_sha256(directory / "chunks.json"),
+        "model": EMBEDDING_MODEL_ID, "revision": DENSE_REVISION,
+        "versions": {name: version(name) for name in ("sentence-transformers", "transformers")},
+    }
+    if stage_problem(directory, EMBEDDINGS, embedding_inputs):
+        texts = [c.page_content for c in children]
+        vectors = get_encoder().encode(texts, batch_size=2, normalize_embeddings=True, show_progress_bar=True)
+        np.savez_compressed(directory / "children-embeddings.npz", vectors=vectors, texts=texts,
+                            child_ids=[c.metadata["child_id"] for c in children],
+                            model=EMBEDDING_MODEL_ID, revision=DENSE_REVISION)
+        record_stage(directory, EMBEDDINGS, embedding_inputs, ["children-embeddings.npz"])
+    load_vectors(directory, children)
+
+    # Le document n'est interrogeable qu'après la réussite de toutes les étapes.
+    catalog = read_catalog(root)
+    catalog["documents"][document_id]["ready"] = True
+    ready = [key for key, entry in catalog["documents"].items() if entry["ready"]]
+    catalog["bm25"] = save_lexical_index(root, ready)
+    write_json(root / CATALOG, catalog)
+    return {"document_id": document_id, **catalog["documents"][document_id],
+            "parents": len(parents), "children": len(children), "directory": str(directory)}

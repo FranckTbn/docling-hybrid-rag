@@ -15,7 +15,7 @@ Ce dépôt est le compagnon exécutable de l'article de TRA Bi Néné Othniel su
 ## Conventions
 
 - Lire avant de modifier. Fonctions courtes et commentaires expliquant les choix.
-- Tout le code métier appartient à `lib`. Le notebook appelle ces fonctions et visualise.
+- Tout le code métier appartient au package `docling_hybrid_rag` (`src/docling_hybrid_rag`). Le notebook appelle ces fonctions et visualise.
 - Une ingestion à la fois. Sauvegarder les résultats coûteux et refuser les caches incompatibles.
 - Conserver BM25 sur les parents, BGE-M3 sur les enfants, RRF sur les parents distincts.
 - Les parents gardent les sections complètes. Les enfants gardent leurs offsets exacts.

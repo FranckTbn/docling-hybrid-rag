@@ -2,7 +2,7 @@
 
 Le code à exécuter pour accompagner l'article **Construire un RAG documentaire pour l’assurance** de TRA Bi Néné Othniel. L'article explique les choix ; ce dépôt permet de les essayer sur un PDF avec sa propre clé API.
 
-Les fonctions reprennent son pipeline : Docling conserve la structure, les parents regroupent les sections, les enfants servent à la recherche dense. BM25 recherche les parents et BGE-M3 les enfants. RRF combine les classements au niveau des parents. Le LLM choisit de répondre directement ou de rechercher 3, 5 ou 7 parents. Il reçoit les parents retenus avec leurs images et répond avec des citations lisibles.
+Les fonctions reprennent son pipeline : Docling conserve la structure, les parents regroupent les sections, les enfants servent à la recherche. BM25 et BGE-M3 recherchent tous deux les enfants, puis chaque enfant est remonté à son parent avant la fusion RRF. Le LLM choisit de répondre directement ou de rechercher, découpe la demande en sous-questions et fixe un budget de 3, 5 ou 7 parents. Chaque sous-question a sa propre recherche. Le modèle reçoit les parents retenus avec leurs images, répond avec des citations lisibles, puis un contrôle signale les paragraphes mal soutenus par leurs sources.
 
 ## Démarrer
 
@@ -31,9 +31,9 @@ Le premier parsing enrichi peut être long, particulièrement sur le guide de 87
 ## 1. Enrichir la base
 
 ```python
-from lib import ingest_document
+from docling_hybrid_rag import ingest_document
 
-record = ingest_document("mon_document.pdf", data_dir="data", title="Mon document")
+record = ingest_document("mon_document.pdf", "data/knowledge", title="Mon document")
 ```
 
 Le premier argument accepte aussi une URL HTTP(S) renvoyant un PDF, notamment le guide de l'article :
@@ -45,16 +45,16 @@ record = ingest_document(
 )
 ```
 
-Une autre ingestion ajoute un document sans remplacer les précédents. Le SHA-256 du PDF distingue les versions. Réingérer exactement le même contenu reprend les étapes sauvegardées sans relancer le parsing ou l'encodeur. Un échec ne rend pas un document partiel cherchable. Si le code de parsing, le chunking ou leurs dépendances changent, utiliser un nouveau dossier `data` pour reconstruire la base.
+Une autre ingestion ajoute un document sans remplacer les précédents. Le SHA-256 du PDF distingue les versions. Réingérer exactement le même contenu reprend les étapes sauvegardées sans relancer le parsing ou l'encodeur. Un échec ne rend pas un document partiel cherchable. Si une option du parsing, le code d'une étape ou la version d'une bibliothèque change, seule cette étape et les suivantes sont recalculées.
 
-Le dossier `data/documents/<sha256>/` conserve le PDF source, `document.json`, ses images dans `artifacts`, les parents/enfants dans `chunks.json`, les vecteurs dans `children-embeddings.npz` et les informations de reprise dans `record.json`. L'index BM25 de l'ensemble des parents est sauvegardé dans `data/indexes/bm25`. `data/manifest.json` liste les documents et l'index disponibles. Les chemins internes sont relatifs pour déplacer cette base avec le projet.
+La base `data/knowledge` contient un `catalog.json` qui relie chaque PDF à son dossier `documents/<empreinte>/`, nommé d'après les 16 premiers caractères du SHA-256 du PDF. Ce dossier conserve le PDF source, `document.json` et ses images dans `artifacts`, les parents/enfants dans `chunks.json` et les vecteurs dans `children-embeddings.npz`. Son `manifest.json` retient, pour le parsing, le chunking et les embeddings, les entrées utilisées et l'empreinte des fichiers produits. L'index BM25 de l'ensemble des parents est sauvegardé dans `indexes/bm25`. Les chemins internes sont relatifs pour déplacer cette base avec le projet.
 
 ## 2. Poser une question avec LangGraph
 
 ```python
-from lib import create_workflow
+from docling_hybrid_rag import create_workflow
 
-rag = create_workflow(data_dir="data", env_path=".env")
+rag = create_workflow("data/knowledge", env_path=".env")
 # Le même identifiant permet de poursuivre cette conversation.
 config = {"configurable": {"thread_id": "ma-conversation"}}
 result = rag.invoke(
@@ -86,29 +86,59 @@ La clé API est désormais utilisée dès le routage, y compris pour une salutat
 
 `result["context"]` permet de voir les parents transmis ; `result["sources"]` contient les références effectivement citées. Le notebook affiche le Markdown, les tableaux, les formules et les images du contexte.
 
+### Sous-questions, reranking et contrôle
+
+Pour une comparaison, le routeur renvoie jusqu'à trois sous-questions dans `result["sub_questions"]`. Chacune est recherchée séparément, en parallèle, avec sa part du budget : un thème très présent dans le document ne peut pas évincer les sources d'un autre. `result["themes"]` montre, pour chaque sous-question, les parents retenus et les reformulations éventuelles.
+
+```python
+from docling_hybrid_rag.settings import get_reranker
+
+rag = create_workflow("data/knowledge", reranker=get_reranker(), relevance_threshold=0.2)
+```
+
+Le reranker `BAAI/bge-reranker-v2-m3` (environ 2,3 Go, téléchargé au premier usage) relit le meilleur enfant de chaque parent candidat face à sa sous-question. Avec `relevance_threshold`, une sous-question dont le meilleur passage reste sous ce score est reformulée une fois, puis déclarée sans passage retrouvé. Ce seuil est à calibrer sur vos propres questions ; la valeur ci-dessus n'est qu'un exemple.
+
+Après la réponse, un appel LLM vérifie que chaque paragraphe est soutenu par les extraits qu'il cite. En cas de doute, une **alerte de vérification** et des pistes de relecture sont ajoutées au message. `result["support"]` contient le détail ; `verify=False` désactive ce contrôle.
+
+### Expansion de requête par thésaurus
+
+L'expansion reprend la méthode de l'article [Query Expansion](https://ornelle.quarto.pub/query-expansion/) de l'auteur : la requête originale est conservée, les libellés des concepts reconnus sont ajoutés avec un poids, et chaque terme pèse sur le score BM25 selon ce poids. Elle est facultative : sans thésaurus, la requête est inchangée.
+
+```python
+thesaurus = {"language": "fr", "concepts": [
+    {"id": "ibnr", "prefLabel": "IBNR", "altLabel": ["sinistres survenus non déclarés"],
+     "hiddenLabel": [], "broader": [], "narrower": [], "related": []},
+]}
+rag = create_workflow("data/knowledge", thesaurus=thesaurus)   # ou un chemin vers un fichier JSON
+```
+
+Par défaut, seuls `prefLabel` (poids 0,95) et `altLabel` (0,85) sont ajoutés ; `hiddenLabel` sert uniquement à reconnaître un concept. Les relations `broader`, `narrower` et `related` ne sont injectées que si `policy` les cite, car ce ne sont pas des synonymes. Le dense garde la question originale. La qualité des équivalences reste à valider par un expert du domaine.
+
 ## 3. Examiner la recherche indépendamment du modèle
 
 ```python
-from lib import load_knowledge_base, hybrid_retrieval, build_context
+from docling_hybrid_rag import load_knowledge_base, hybrid_retrieval, build_context
 
-base = load_knowledge_base("data")
+base = load_knowledge_base("data/knowledge")
 hits = hybrid_retrieval("Comment calculer l'incertitude avec Mack ?", base)
 context = build_context(hits["parent_ids"], base)
 ```
 
-BM25 est construit pendant l'ingestion sur l'ensemble des parents, avec les stopwords français pour le corpus et les questions, puis sauvegardé. Les deux index sont rechargés sans réencodage ; seule une nouvelle question est encodée. Les vingt candidats de chaque canal sont ramenés à des parents distincts avant RRF (constante 60). Un parent dense garde son meilleur enfant. L'appel direct à `hybrid_retrieval` garde par défaut trois parents, avec toutes leurs figures conservées. Dans le workflow, le LLM transmet son choix de 3, 5 ou 7 via `context_k`.
+BM25 est construit pendant l'ingestion sur les enfants de toute la base, avec les mots courants français ignorés et une racinisation française (« provisions » retrouve « provision »), puis sauvegardé. Le texte d'un enfant contient les titres de sa section. Les deux index sont rechargés sans réencodage ; seule une nouvelle question est encodée. Les vingt enfants candidats de chaque canal sont ramenés à des parents distincts avant RRF (constante 60) ; chaque parent garde son meilleur enfant dans chaque canal. L'appel direct à `hybrid_retrieval` garde par défaut trois parents, avec toutes leurs figures conservées. Dans le workflow, le LLM transmet son choix de 3, 5 ou 7 via `context_k`.
 
 ## Correspondance avec l'article
 
 | Partie de l'article | Code du dépôt |
 |---|---|
-| Configurer, parser, sauvegarder et recharger | `lib/parsing.py` |
-| Construire les parents et les enfants | `lib/chunking.py` |
-| Enrichir la base et reprendre les calculs | `lib/ingestion.py`, `lib/storage.py` |
-| BM25, dense, meilleurs enfants et RRF | `lib/retrieval.py` |
-| Parents et images, registre des sources | `lib/context.py` |
-| Prompt, réponse structurée, citations | `lib/answer.py` |
-| Preuve nécessaire, branches et `invoke` | `lib/workflow.py` |
+| Configurer, parser, sauvegarder et recharger | `src/docling_hybrid_rag/parsing.py` |
+| Construire les parents et les enfants | `src/docling_hybrid_rag/chunking.py` |
+| Expansion de requête par thésaurus | `src/docling_hybrid_rag/expansion.py`, `src/docling_hybrid_rag/indexing.py` |
+| Contrôle de soutien et alertes | `src/docling_hybrid_rag/verification.py` |
+| Enrichir la base et reprendre les calculs | `src/docling_hybrid_rag/ingestion.py`, `src/docling_hybrid_rag/store.py` |
+| BM25, dense, meilleurs enfants et RRF | `src/docling_hybrid_rag/retrieval.py` |
+| Parents et images, registre des sources | `src/docling_hybrid_rag/context.py` |
+| Prompt, réponse structurée, citations | `src/docling_hybrid_rag/answer.py` |
+| Preuve nécessaire, branches et `invoke` | `src/docling_hybrid_rag/workflow.py` |
 
 Les adaptations concernent les arguments des fonctions, les identifiants distincts entre PDF, les chemins portables et la persistance. Le parsing, les sections entières comme parents, les enfants autour de 400 tokens et les 20 candidats par canal restent ceux de l'article. Le workflow ajoute un routeur LLM et une mémoire courte ; son budget de 3, 5 ou 7 parents prolonge la démonstration de l'article à trois parents fixes. Les tableaux et formules ne sont pas coupés : 400 est une cible souple, pas une limite stricte ni un optimum démontré.
 
@@ -120,7 +150,7 @@ python -m unittest discover -s tests -v
 
 Les tests hors ligne exercent les identifiants, la reprise d'ingestion, les frontières des enfants, RRF, la provenance et les branches du vrai graphe avec un modèle de test. Ils n'établissent pas la qualité actuarielle d'une réponse. Les résultats réels du guide sont vérifiés séparément par rapport à l'article ; ils ne sont pas distribués comme réponses universelles.
 
-La vérification locale sur le guide retrouve les mêmes 128 parents, 195 enfants, trois parents RRF, images et références que l'article, en réutilisant ses résultats de parsing et d'encodage. Une génération réelle a aussi montré une imprécision sur la MSEP, commentée dans l'article : des références valides ne suffisent pas à garantir une interprétation correcte.
+Sur le guide, le chunking du package reproduit exactement celui de l'article : 187 parents et 397 enfants identiques (`tests/test_article_parity.py`, avec `RAG_ARTICLE_DIR`). Une génération réelle a aussi montré une imprécision sur la MSEP, commentée dans l'article : des références valides ne suffisent pas à garantir une interprétation correcte.
 
 Les figures accompagnent les parents retenus, mais ne sont pas indexées par leurs pixels. RRF favorise l'accord entre moteurs et ne garantit pas que les parents choisis suffisent. Le routeur peut se tromper de branche ou de budget ; tester ses décisions sur ses propres questions. Les liens indiquent la section ou l'objet et les pages ; ils ne prouvent pas que chaque affirmation est exacte. Pour un PDF local, la citation ouvre sa copie locale, pas une URL publique.
 

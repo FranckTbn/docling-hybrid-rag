@@ -10,8 +10,11 @@ EMBEDDING_MODEL_ID = "BAAI/bge-m3"
 DENSE_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 CHILD_MAX_TOKENS = 400
 CANDIDATE_K = 20
+RERANK_K = 12
 CONTEXT_K = 3
 ANSWER_MODEL = "gpt-5.6-luna"
+# Même famille que BGE-M3, multilingue ; il relit chaque couple (question, passage).
+RERANKER_MODEL_ID = "BAAI/bge-reranker-v2-m3"
 
 
 @lru_cache(maxsize=1)
@@ -29,6 +32,14 @@ def get_tokenizer():
         tokenizer=AutoTokenizer.from_pretrained(EMBEDDING_MODEL_ID, revision=DENSE_REVISION),
         max_tokens=CHILD_MAX_TOKENS,
     )
+
+
+@lru_cache(maxsize=1)
+def get_reranker():
+    # Téléchargement au premier usage. Les passages au-delà de 512 tokens sont tronqués :
+    # on lui donne des enfants, pas des parents entiers.
+    from sentence_transformers import CrossEncoder
+    return CrossEncoder(RERANKER_MODEL_ID, max_length=512, device="cpu")
 
 
 def get_llm(env_path: str | Path = ".env", model: str | None = None):

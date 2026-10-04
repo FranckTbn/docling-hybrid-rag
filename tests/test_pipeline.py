@@ -13,17 +13,29 @@ from docling_core.types.doc import (
     DoclingDocument, DocItemLabel, Size, ProvenanceItem, BoundingBox, ImageRef,
 )
 
-from lib import ingest_document, load_knowledge_base, hybrid_retrieval, build_context, create_workflow
-from lib.answer import SourcedAnswer, validate_answer, make_answer_messages, citation_schema, sourced_answer_markdown
-from lib.context import parent_content_blocks
-from lib.retrieval import fuse_parents, rank_dense_parents
-from lib.storage import read_json, write_json
-from tests.test_workflow import ScriptedLLM, decision, conversation
+from docling_hybrid_rag import ingest_document, load_knowledge_base, hybrid_retrieval, build_context, create_workflow
+from docling_hybrid_rag.answer import SourcedAnswer, validate_answer, make_answer_messages, citation_schema, sourced_answer_markdown
+from docling_hybrid_rag.context import parent_content_blocks
+from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
+
+from docling_hybrid_rag.parsing import default_pdf_options, load_parsed_document
+from docling_hybrid_rag.retrieval import fuse_parents, rank_parents
+from docling_hybrid_rag.store import add_source, find_document, read_catalog, read_json, record_stage, write_json
+from tests.test_workflow import ScriptedLLM, decision, conversation, supported
 
 
-class WordTokenizer:
+class WordTokenizer(BaseTokenizer):
+    """Un token par mot : assez pour tester les frontières, sans télécharger de modèle."""
+    max_tokens: int = 400
+
     def count_tokens(self, text):
         return len(text.split())
+
+    def get_max_tokens(self):
+        return self.max_tokens
+
+    def get_tokenizer(self):
+        return None
 
 
 class FakeEncoder:
@@ -56,31 +68,79 @@ class PipelineTests(unittest.TestCase):
         self.data = self.root / "data"
         self.pdf = self.root / "guide.pdf"
         self.pdf.write_bytes(b"%PDF-1.4 fixture A")
-        self.parse = self.enterContext(patch("lib.parsing.parse_document", side_effect=lambda *a: sample_document()))
-        self.enterContext(patch("lib.parsing.build_document_converter", return_value=object()))
-        self.enterContext(patch("lib.ingestion.get_tokenizer", return_value=WordTokenizer()))
-        self.encode = self.enterContext(patch("lib.ingestion.get_encoder", return_value=FakeEncoder()))
+        self.parse = self.enterContext(patch("docling_hybrid_rag.parsing.parse_document", side_effect=lambda *a: sample_document()))
+        self.enterContext(patch("docling_hybrid_rag.parsing.build_document_converter", return_value=object()))
+        self.enterContext(patch("docling_hybrid_rag.ingestion.get_tokenizer", return_value=WordTokenizer()))
+        self.encode = self.enterContext(patch("docling_hybrid_rag.ingestion.get_encoder", return_value=FakeEncoder()))
 
-    def ingest(self, pdf=None):
-        return ingest_document(pdf or self.pdf, self.data, title="Guide de test")
+    def ingest(self, pdf=None, **options):
+        return ingest_document(pdf or self.pdf, self.data, title="Guide de test", **options)
 
     def test_ingestion_reuses_saved_parsing_and_vectors(self):
         first = self.ingest()
         self.ingest()
         self.assertEqual(self.parse.call_count, 1)
         self.assertEqual(self.encode.call_count, 1)
-        self.assertEqual(read_json(self.data / "manifest.json")["documents"], [first["document_id"]])
+        self.assertEqual(list(read_catalog(self.data)["documents"]), [first["document_id"]])
         base = load_knowledge_base(self.data)
         self.assertEqual(base.vectors.shape, (len(base.children), 1024))
 
     def test_failed_encoding_is_not_published_and_resumes_without_parsing(self):
-        with patch("lib.ingestion.get_encoder", side_effect=RuntimeError("interruption simulée")):
+        with patch("docling_hybrid_rag.ingestion.get_encoder", side_effect=RuntimeError("interruption simulée")):
             with self.assertRaisesRegex(RuntimeError, "interruption"):
                 self.ingest()
-        self.assertFalse((self.data / "manifest.json").exists())
+        entry = next(iter(read_catalog(self.data)["documents"].values()))
+        self.assertFalse(entry["ready"])
+        with self.assertRaisesRegex(ValueError, "Base vide"):
+            load_knowledge_base(self.data)
         self.ingest()
         self.assertEqual(self.parse.call_count, 1)
-        self.assertTrue((self.data / "manifest.json").is_file())
+        self.assertTrue(next(iter(read_catalog(self.data)["documents"].values()))["ready"])
+
+    def test_same_pdf_gets_the_same_folder(self):
+        directory = add_source(self.pdf, self.data)
+        copy = self.root / "copie.pdf"
+        copy.write_bytes(self.pdf.read_bytes())
+        self.assertEqual(add_source(copy, self.data), directory)
+        self.assertEqual(find_document(self.data, directory.name), directory)
+        with self.assertRaisesRegex(ValueError, "pas dans la base"):
+            find_document(self.data, "https://example.org/absent.pdf")
+
+    def test_changed_parsing_option_reparses_but_identical_json_keeps_chunks_and_vectors(self):
+        self.ingest()
+        options = default_pdf_options()
+        options.do_formula_enrichment = False
+        self.ingest(pdf_options=options)
+        self.assertEqual(self.parse.call_count, 2)
+        # Le JSON produit est identique : chunking et embeddings restent valides.
+        self.assertEqual(self.encode.call_count, 1)
+
+    def test_speed_settings_do_not_invalidate_parsing(self):
+        self.ingest()
+        options = default_pdf_options()
+        options.layout_batch_size = 1
+        options.accelerator_options.num_threads = 1
+        self.ingest(pdf_options=options)
+        self.assertEqual(self.parse.call_count, 1)
+
+    def test_reloading_with_other_options_is_refused(self):
+        result = self.ingest()
+        options = default_pdf_options()
+        options.do_formula_enrichment = False
+        with self.assertRaisesRegex(ValueError, r"entrées de l'étape parsing ont changé \(options\)"):
+            load_parsed_document(Path(result["directory"]), options)
+        self.assertEqual(len(load_parsed_document(Path(result["directory"])).texts), 3)
+
+    def test_steps_that_no_longer_follow_each_other_are_refused(self):
+        result = self.ingest()
+        directory = Path(result["directory"])
+        # Simule un nouveau parsing enregistré sans refaire le chunking.
+        (directory / "document.json").write_text(
+            (directory / "document.json").read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        record_stage(directory, "parsing", read_json(directory / "manifest.json")["stages"]["parsing"]["inputs"],
+                     ["document.json"])
+        with self.assertRaisesRegex(ValueError, "ne se suivent plus"):
+            load_knowledge_base(self.data)
 
     def test_two_documents_keep_distinct_parents_and_sources(self):
         self.ingest()
@@ -105,16 +165,13 @@ class PipelineTests(unittest.TestCase):
                 meta = child.metadata
                 self.assertEqual(parent.page_content[meta["start"]:meta["end"]], meta["raw_text"])
 
-    def test_stale_vectors_and_changed_pipeline_are_refused(self):
+    def test_modified_chunks_are_refused(self):
         result = self.ingest()
         path = Path(result["directory"])
-        with patch("lib.retrieval.pipeline_signature", return_value="changed"):
-            with self.assertRaisesRegex(ValueError, "pipeline"):
-                load_knowledge_base(self.data)
         chunks = read_json(path / "chunks.json")
         chunks["children"][0]["page_content"] = "Contenu modifié"
         write_json(path / "chunks.json", chunks)
-        with self.assertRaisesRegex(ValueError, "embeddings"):
+        with self.assertRaisesRegex(ValueError, "chunks.json a changé"):
             load_knowledge_base(self.data)
 
     def test_hybrid_keeps_ranked_parents_and_correct_context(self):
@@ -149,7 +206,7 @@ class PipelineTests(unittest.TestCase):
         result = self.ingest()
         path = Path(result["directory"]) / "document.json"
         path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "source a changé"):
+        with self.assertRaisesRegex(ValueError, "document.json a changé"):
             load_knowledge_base(self.data)
 
     def test_lexical_index_is_reloaded_without_rebuilding(self):
@@ -167,7 +224,7 @@ class PipelineTests(unittest.TestCase):
         fake_llm = ScriptedLLM(
             routes=[decision("retrieve", 5, "Comment Mack mesure la variance des provisions ?"),
                     decision("direct", 3, "merci")],
-            answers=[response], direct_answers=["Avec plaisir !"],
+            answers=[response], direct_answers=["Avec plaisir !"], reports=[supported(1)],
         )
         graph = create_workflow(self.data, llm=fake_llm, encoder=FakeEncoder())
         config = conversation("guide")
@@ -182,8 +239,10 @@ class PipelineTests(unittest.TestCase):
         direct = graph.invoke({"question": "merci"}, config)
         self.assertEqual(direct["context"]["parents"], [])
         self.assertEqual(direct["sources"], {})
-        self.assertEqual(direct["retrieval"], {})
+        self.assertEqual(direct["themes"], [])
         self.assertEqual(direct["context_k"], 0)
+        self.assertEqual(result["support"]["checks"][0]["verdict"], "soutenu")
+        self.assertNotIn("Alerte de vérification", result["answer"])
 
 
 
@@ -219,7 +278,7 @@ class ContractTests(unittest.TestCase):
         children = {key: SimpleNamespace(metadata={"parent_id": parent})
                     for key, parent in (("a1", "a"), ("a2", "a"), ("b1", "b"))}
         hits = [{"child_id": key, "score": score} for key, score in (("a1", .9), ("a2", .8), ("b1", .7))]
-        result = rank_dense_parents(hits, children)
+        result = rank_parents(hits, children)
         self.assertEqual([h["parent_id"] for h in result], ["a", "b"])
         self.assertEqual(result[0]["child_id"], "a1")
 
