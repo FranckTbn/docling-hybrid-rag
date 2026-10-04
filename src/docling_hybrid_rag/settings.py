@@ -15,6 +15,7 @@ CONTEXT_K = 3
 ANSWER_MODEL = "gpt-5.6-luna"
 # Même famille que BGE-M3, multilingue ; il relit chaque couple (question, passage).
 RERANKER_MODEL_ID = "BAAI/bge-reranker-v2-m3"
+RERANKER_REVISION = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
 
 
 @lru_cache(maxsize=1)
@@ -39,7 +40,7 @@ def get_reranker():
     # Téléchargement au premier usage. Les passages au-delà de 512 tokens sont tronqués :
     # on lui donne des enfants, pas des parents entiers.
     from sentence_transformers import CrossEncoder
-    return CrossEncoder(RERANKER_MODEL_ID, max_length=512, device="cpu")
+    return CrossEncoder(RERANKER_MODEL_ID, revision=RERANKER_REVISION, max_length=512, device="cpu")
 
 
 def get_llm(env_path: str | Path = ".env", model: str | None = None):
