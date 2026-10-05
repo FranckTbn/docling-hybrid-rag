@@ -1,9 +1,11 @@
 """Recherche d'une question : BM25 et dense sur les enfants, remontée aux parents,
 fusion RRF, puis reranking facultatif des parents candidats."""
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property
+from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
 
@@ -12,8 +14,8 @@ import numpy as np
 
 from docling_hybrid_rag.expansion import expand_query
 from docling_hybrid_rag.indexing import weighted_scores
-from docling_hybrid_rag.settings import get_encoder, CANDIDATE_K, CONTEXT_K, RERANK_K
-from docling_hybrid_rag.storage import load_chunks, load_vectors
+from docling_hybrid_rag.settings import get_encoder, CANDIDATE_K, CONTEXT_K, DENSE_REVISION, EMBEDDING_MODEL_ID, RERANK_K
+from docling_hybrid_rag.storage import children_sha256, load_chunks, load_vectors
 from docling_hybrid_rag.store import file_sha256, read_catalog, read_json, require_stage
 
 
@@ -44,8 +46,7 @@ def _check_document(directory: Path, entry: dict) -> None:
     embeddings = require_stage(directory, "embeddings")
     if (file_sha256(directory / "source.pdf") != entry["source_sha256"]
         or parsing["inputs"]["source_sha256"] != entry["source_sha256"]
-        or chunking["inputs"]["document_sha256"] != parsing["outputs"]["document.json"]
-        or embeddings["inputs"]["chunks_sha256"] != chunking["outputs"]["chunks.json"]):
+        or chunking["inputs"]["document_sha256"] != parsing["outputs"]["document.json"]):
         raise ValueError(f"Document {directory.name} : les étapes ne se suivent plus. Relancer ingest_document.")
 
 
@@ -61,6 +62,8 @@ def load_knowledge_base(knowledge_dir: str | Path = "data/knowledge") -> Knowled
         directory = root / "documents" / document_id
         _check_document(directory, entry)
         doc_parents, doc_children = load_chunks(directory)
+        if require_stage(directory, "embeddings")["inputs"]["children_sha256"] != children_sha256(doc_children):
+            raise ValueError(f"Document {directory.name} : les embeddings ne viennent plus de ces enfants. Relancer ingest_document.")
         matrices.append(load_vectors(directory, doc_children))
         parents.extend(doc_parents)
         children.extend(doc_children)
@@ -73,6 +76,24 @@ def load_knowledge_base(knowledge_dir: str | Path = "data/knowledge") -> Knowled
     index = bm25s.BM25.load(str(index_dir), load_corpus=False, show_progress=False)
     return KnowledgeBase(root, parents, children, np.concatenate(matrices), index, records,
                          contract["settings"])
+
+
+def encode_question(question: str, knowledge_base: KnowledgeBase, *, encoder=None) -> np.ndarray:
+    """Vecteur normalisé d'une question, enregistré dans la base pour ne pas recharger le modèle.
+
+    Une même question, avec le même modèle et la même révision, retrouve son vecteur sur disque.
+    """
+    key = sha256(json.dumps([question, EMBEDDING_MODEL_ID, DENSE_REVISION], ensure_ascii=False).encode()).hexdigest()[:16]
+    path = knowledge_base.knowledge_dir / "queries" / f"{key}.npz"
+    if path.exists():
+        with np.load(path, allow_pickle=False) as saved:
+            if (saved["question"].item() == question and saved["model"].item() == EMBEDDING_MODEL_ID
+                    and saved["revision"].item() == DENSE_REVISION):
+                return saved["vector"]
+    vector = (encoder or get_encoder()).encode(question, normalize_embeddings=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, vector=vector, question=question, model=EMBEDDING_MODEL_ID, revision=DENSE_REVISION)
+    return vector
 
 
 def retrieve_bm25(query: str | list[dict], knowledge_base: KnowledgeBase, k=CANDIDATE_K):

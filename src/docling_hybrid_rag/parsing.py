@@ -1,12 +1,13 @@
 """Pipeline Docling de l'article : configurer, parser, sauvegarder, recharger."""
 
+import re
 from importlib.metadata import version
 from pathlib import Path
 
 from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling.datamodel.pipeline_options import CodeFormulaVlmOptions, HeadingHierarchyOptions, PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling_core.types.doc import DoclingDocument, ImageRefMode
+from docling_core.types.doc import DocItemLabel, DoclingDocument, ImageRefMode
 
 from docling_hybrid_rag.store import code_fingerprint, file_sha256, record_stage, require_stage
 
@@ -96,8 +97,28 @@ def save_parsed_document(
     return canonical_path
 
 
+_STRAY_TAG = re.compile(r"\s*</(?:formula|code)\s*>?\s*$")
+
+
+def clean_parsed_document(doc: DoclingDocument) -> int:
+    """Retirer la balise `</formula` ou `</code` qui reste à la fin d'un texte transcrit.
+
+    Le nettoyage des sorties de Granite Docling retire `</formula>` avec son `>`, mais le
+    modèle écrit parfois la balise sans `>` : elle apparaissait dans le LaTeX affiché et
+    dans le contexte du modèle. Renvoie le nombre de textes corrigés.
+    """
+    fixed = 0
+    for item in doc.texts:
+        if item.label in (DocItemLabel.FORMULA, DocItemLabel.CODE) and _STRAY_TAG.search(item.text):
+            item.text = _STRAY_TAG.sub("", item.text)
+            item.orig = _STRAY_TAG.sub("", item.orig)
+            fixed += 1
+    return fixed
+
+
 def load_document(canonical_path: Path) -> DoclingDocument:
     doc = DoclingDocument.load_from_json(canonical_path)
+    clean_parsed_document(doc)
     for picture in doc.pictures:
         if picture.image is not None:
             # Le JSON garde des chemins relatifs à son dossier ; Docling a besoin du chemin complet.

@@ -115,6 +115,18 @@ class PipelineTests(unittest.TestCase):
         # Le JSON produit est identique : chunking et embeddings restent valides.
         self.assertEqual(self.encode.call_count, 1)
 
+    def test_changing_the_parent_scope_rechunks_but_keeps_the_vectors(self):
+        self.ingest()
+        base = load_knowledge_base(self.data)
+        sections = len(base.parents)
+        self.ingest(parent_scope="elements")
+        self.assertEqual(self.parse.call_count, 1)
+        # Les enfants sont les mêmes : seul leur regroupement en parents change.
+        self.assertEqual(self.encode.call_count, 1)
+        rechunked = load_knowledge_base(self.data)
+        self.assertGreaterEqual(len(rechunked.parents), sections)
+        self.assertEqual(len(rechunked.children), len(base.children))
+
     def test_speed_settings_do_not_invalidate_parsing(self):
         self.ingest()
         options = default_pdf_options()
@@ -224,7 +236,8 @@ class PipelineTests(unittest.TestCase):
         fake_llm = ScriptedLLM(
             routes=[decision("retrieve", 5, "Comment Mack mesure la variance des provisions ?"),
                     decision("direct", 3, "merci")],
-            answers=[response], direct_answers=["Avec plaisir !"], reports=[supported(1)],
+            answers=[response], direct_answers=["Avec plaisir !"],
+            reports=[supported(1, quote="Mack mesure la variance des provisions")],
         )
         graph = create_workflow(self.data, llm=fake_llm, encoder=FakeEncoder())
         config = conversation("guide")

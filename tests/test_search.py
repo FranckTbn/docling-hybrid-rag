@@ -11,7 +11,7 @@ from langchain_core.documents import Document
 
 from docling_hybrid_rag.expansion import expand_query, load_thesaurus
 from docling_hybrid_rag.indexing import LEXICAL_SETTINGS, lexical_tokens, weighted_scores
-from docling_hybrid_rag.retrieval import KnowledgeBase, hybrid_retrieval, rank_parents, retrieve_bm25
+from docling_hybrid_rag.retrieval import KnowledgeBase, encode_question, hybrid_retrieval, rank_parents, retrieve_bm25
 
 THESAURUS = {"language": "fr", "concepts": [
     {"id": "ibnr", "prefLabel": "IBNR", "altLabel": ["sinistres survenus non déclarés"],
@@ -82,6 +82,28 @@ class LexicalSearchTests(unittest.TestCase):
         self.assertEqual(retrieve_bm25(question, base), [])
         hits = retrieve_bm25(expand_query(question, THESAURUS), base)
         self.assertEqual([hit["child_id"] for hit in hits], ["c0"])
+
+
+class QuestionVectorCacheTests(unittest.TestCase):
+    def test_a_question_is_encoded_once_then_read_from_the_base(self):
+        class CountingEncoder:
+            calls = 0
+
+            def encode(self, text, **kwargs):
+                CountingEncoder.calls += 1
+                vector = np.zeros(1024, dtype=np.float32)
+                vector[0] = 1
+                return vector
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = knowledge_base(["Mack variance", "Chain-Ladder"])
+            base.knowledge_dir = Path(directory)
+            first = encode_question("Qu'est-ce que l'IBNR ?", base, encoder=CountingEncoder())
+            second = encode_question("Qu'est-ce que l'IBNR ?", base, encoder=CountingEncoder())
+            np.testing.assert_array_equal(first, second)
+            self.assertEqual(CountingEncoder.calls, 1)
+            encode_question("Une autre question ?", base, encoder=CountingEncoder())
+            self.assertEqual(CountingEncoder.calls, 2)
 
 
 class ParentRankingTests(unittest.TestCase):

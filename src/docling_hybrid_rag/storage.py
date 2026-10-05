@@ -1,5 +1,7 @@
 """Relire les chunks et les vecteurs enregistrés d'un document."""
 
+import json
+from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +16,12 @@ def load_chunks(directory: Path):
     parents = [Document(**item) for item in bundle["parents"]]
     children = [Document(**item) for item in bundle["children"]]
     return parents, children
+
+
+def children_sha256(children) -> str:
+    """Empreinte des enfants indexés : l'encodage ne dépend que de leurs identifiants et de leurs textes."""
+    payload = [[c.metadata["child_id"], c.page_content] for c in children]
+    return sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
 
 
 def load_vectors(directory: Path, children) -> np.ndarray:
