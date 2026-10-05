@@ -147,6 +147,27 @@ context = build_context(hits["parent_ids"], base)
 
 BM25 est construit pendant l'ingestion sur les enfants de toute la base, avec les mots courants français ignorés et une racinisation française (« provisions » retrouve « provision »), puis sauvegardé. Le texte d'un enfant contient les titres de sa section. Les deux index sont rechargés sans réencodage ; seule une nouvelle question est encodée. Les vingt enfants candidats de chaque canal sont ramenés à des parents distincts avant RRF (constante 60) ; chaque parent garde son meilleur enfant dans chaque canal. L'appel direct à `hybrid_retrieval` garde par défaut trois parents, avec toutes leurs figures conservées. Dans le workflow, le LLM transmet son choix de 3, 5 ou 7 via `context_k`.
 
+## Utiliser le workflow dans une application
+
+Un serveur qui pose une question par appel n'a pas besoin de mémoire de conversation, de liens HTML ni d'un modèle qui reste chargé :
+
+```python
+from docling_hybrid_rag import create_workflow, document_passages, load_knowledge_base, plain_citation, release_models, total_usage
+
+rag = create_workflow("ma_base", memory=False, link=plain_citation)  # pas de thread_id, citations en texte seul
+result = rag.invoke({"question": "Quelle est la conclusion du rapport 2 ?"})
+
+result["answer"]    # réponse avec citations en texte (« Rapport 2, 4. Conclusion, p. 12 »), et alerte de vérification
+result["sources"]   # les sources citées : le contrat stable pour construire vos propres liens
+result["usage"]     # une entrée par appel au modèle ; total_usage(result["usage"]) les additionne
+
+base = load_knowledge_base("ma_base")
+passages = document_passages(base, "Rapport 2")   # tous les parents du document, dans l'ordre, avec section et pages
+release_models()    # rend la mémoire (BGE-M3 et le reranker pèsent environ 2 Go chacun) ; ils se rechargent au besoin
+```
+
+Chaque source de `result["sources"]` porte `parent_id`, `document_title`, `name` (section, tableau, figure ou formule), `pages` (numéros de page du PDF), `text` (l'extrait cité), `ref` (référence Docling de l'objet, ou `None` pour une section entière) et `source_url` (l'URL du PDF, ou son chemin local). `memory=False` est le bon réglage d'un serveur : sans lui, chaque identifiant de conversation garde ses points de reprise en RAM jusqu'à l'arrêt du processus. Pour partager une seule instance de l'encodeur entre plusieurs graphes, passez `encoder=` (et `reranker=`) à `create_workflow`. `usage` vaut zéro quand le fournisseur ne renvoie pas de `usage_metadata`. Une base copiée vers un environnement dont la version de `bm25s` diffère reconstruit son index BM25 au chargement (`reindex(dossier)` le fait à la demande).
+
 ## Mesurer la recherche sur des benchmarks publics
 
 Deux benchmarks sont intégrés au package (`pip install "docling-hybrid-rag[benchmarks] @ git+https://github.com/FranckTbn/docling-hybrid-rag.git"`). Chaque exécution enregistre les versions qui l'ont produite, et chaque jeu est téléchargé à une révision figée : les mêmes fichiers, donc les mêmes chiffres.

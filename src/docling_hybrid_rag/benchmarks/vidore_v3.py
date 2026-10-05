@@ -10,6 +10,7 @@ du parsing à la recherche.
     python -m docling_hybrid_rag.benchmarks.vidore_v3 download --dataset hr
     python -m docling_hybrid_rag.benchmarks.vidore_v3 baseline --dataset hr    # BM25 sur le texte fourni : vérifie le protocole
     python -m docling_hybrid_rag.benchmarks.vidore_v3 ingest   --dataset hr    # long : parse chaque PDF avec Docling
+    python -m docling_hybrid_rag.benchmarks.vidore_v3 status   --dataset hr    # combien de PDF sont ingérés (code de sortie 0 si tous)
     python -m docling_hybrid_rag.benchmarks.vidore_v3 evaluate --dataset hr
 
 Chaque étape reprend où elle s'est arrêtée. Les fichiers vont dans `--data-dir` (par défaut
@@ -136,6 +137,16 @@ def ingest(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, *, p
         print(entry, flush=True)
 
 
+def status(dataset: str, data_dir: Path, knowledge_dir: Path | None = None) -> tuple[int, int]:
+    """(documents prêts dans la base, documents du jeu) : l'ingestion est terminée quand les deux sont égaux."""
+    target = dataset_dir(data_dir, dataset)
+    catalog = (knowledge_dir or target / "knowledge") / "catalog.json"
+    ready = 0
+    if catalog.exists():
+        ready = sum(1 for entry in json.loads(catalog.read_text(encoding="utf-8"))["documents"].values() if entry["ready"])
+    return ready, len(load_documents(target))
+
+
 def baseline_bm25(dataset: str, data_dir: Path, k: int = 10) -> dict:
     """BM25 sur le texte des pages fourni avec le jeu : reproduit le BM25S publié et vérifie le protocole.
 
@@ -239,7 +250,7 @@ def evaluate(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, ou
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("stage", choices=["download", "baseline", "ingest", "evaluate"])
+    parser.add_argument("stage", choices=["download", "baseline", "ingest", "status", "evaluate"])
     parser.add_argument("--dataset", choices=sorted(DATASETS), default="hr")
     parser.add_argument("--data-dir", type=Path, default=Path("data/benchmarks/vidore-v3"))
     parser.add_argument("--knowledge-dir", type=Path, default=None)
@@ -251,6 +262,10 @@ def main() -> None:
         print(json.dumps(baseline_bm25(args.dataset, args.data_dir)))
     elif args.stage == "ingest":
         ingest(args.dataset, args.data_dir, args.knowledge_dir, only=args.only)
+    elif args.stage == "status":
+        ready, total = status(args.dataset, args.data_dir, args.knowledge_dir)
+        print(f"{ready}/{total} documents ingérés")
+        raise SystemExit(0 if ready == total else 1)
     else:
         output = dataset_dir(args.data_dir, args.dataset) / "results.json"
         results = evaluate(args.dataset, args.data_dir, args.knowledge_dir, output)

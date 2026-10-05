@@ -153,6 +153,88 @@ class PipelineTests(unittest.TestCase):
         for parent in base.parents:
             self.assertEqual(parent.metadata["page_start"], min(parent.metadata["pages"]))
 
+    def test_bm25_index_built_elsewhere_is_rebuilt_instead_of_refused(self):
+        import shutil
+        import warnings
+
+        from docling_hybrid_rag import reindex
+        from docling_hybrid_rag.store import CATALOG
+
+        self.ingest()
+        catalog = read_catalog(self.data)
+        copied = self.data / "indexes/bm25/copie-venue-d-ailleurs"
+        shutil.copytree(self.data / catalog["bm25"], copied)
+        contract = read_json(copied / "contract.json")
+        contract["versions"] = {"bm25s": "0.0.1", "PyStemmer": "0.0.1"}  # un autre environnement
+        write_json(copied / "contract.json", contract)
+        catalog["bm25"] = "indexes/bm25/copie-venue-d-ailleurs"
+        write_json(self.data / CATALOG, catalog)
+        with self.assertWarnsRegex(UserWarning, "reconstruit"):
+            base = load_knowledge_base(self.data)
+        self.assertEqual(len(base.children), len(read_json(copied / "contract.json")["child_ids"]))
+        rebuilt = read_catalog(self.data)["bm25"]
+        self.assertNotEqual(rebuilt, "indexes/bm25/copie-venue-d-ailleurs")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            load_knowledge_base(self.data)  # l'index refait est celui de cet environnement : plus d'avertissement
+        self.assertEqual(reindex(self.data), rebuilt)
+
+    def test_bm25_index_of_other_children_is_refused_with_the_reindex_hint(self):
+        import shutil
+
+        from docling_hybrid_rag.store import CATALOG
+
+        self.ingest()
+        catalog = read_catalog(self.data)
+        copied = self.data / "indexes/bm25/autres-enfants"
+        shutil.copytree(self.data / catalog["bm25"], copied)
+        contract = read_json(copied / "contract.json")
+        contract["texts"][0] = "Un texte qui n'est plus celui de l'enfant."
+        write_json(copied / "contract.json", contract)
+        catalog["bm25"] = "indexes/bm25/autres-enfants"
+        write_json(self.data / CATALOG, catalog)
+        with self.assertRaisesRegex(ValueError, r"reindex\(knowledge_dir\)"):
+            load_knowledge_base(self.data)
+
+    def test_document_passages_give_the_parents_in_reading_order_with_their_pages(self):
+        from docling_hybrid_rag import document_passages
+
+        record = self.ingest()
+        base = load_knowledge_base(self.data)
+        passages = document_passages(base, record["document_id"])
+        self.assertEqual([p["parent_id"] for p in passages], [p.metadata["parent_id"] for p in base.parents])
+        for passage in passages:
+            self.assertTrue(passage["text"].strip())
+            self.assertTrue(passage["pages"])
+            self.assertEqual(passage["page_start"], min(passage["pages"]))
+        self.assertEqual(passages, document_passages(base, "Guide de test"))  # par titre
+        with self.assertRaisesRegex(ValueError, "pas dans la base"):
+            document_passages(base, "inconnu")
+
+    def test_release_models_forces_the_next_call_to_load_them_again(self):
+        from functools import lru_cache
+
+        from docling_hybrid_rag import release_models, settings
+
+        loads = []
+
+        @lru_cache(maxsize=1)
+        def encoder():
+            loads.append("encodeur")
+            return object()
+
+        @lru_cache(maxsize=1)
+        def reranker():
+            loads.append("reranker")
+            return object()
+
+        with patch.object(settings, "get_encoder", encoder), patch.object(settings, "get_reranker", reranker):
+            encoder(), encoder(), reranker(), reranker()
+            self.assertEqual(loads, ["encodeur", "reranker"])
+            release_models()
+            encoder(), reranker()
+            self.assertEqual(loads, ["encodeur", "reranker", "encodeur", "reranker"])
+
     def test_speed_settings_do_not_invalidate_parsing(self):
         self.ingest()
         options = default_pdf_options()

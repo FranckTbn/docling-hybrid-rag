@@ -88,6 +88,31 @@ def ensure_embeddings(directory: str | Path, *, encoder=None) -> np.ndarray:
     return load_vectors(directory, children)
 
 
+def reindex(knowledge_dir: str | Path = "data/knowledge") -> str:
+    """Reconstruire l'index BM25 de la base à partir de ses enfants, et le renvoyer.
+
+    L'index est entièrement dérivé des enfants : le refaire est rapide, sans nouveau parsing ni nouvel encodage.
+    À utiliser après une copie de la base vers un environnement dont les versions de `bm25s` diffèrent.
+    La langue est celle de la base ; une base plus ancienne garde les règles de son index actuel.
+    """
+    from docling_hybrid_rag.store import read_json
+
+    root = Path(knowledge_dir).resolve()
+    catalog = read_catalog(root)
+    ready = [key for key, entry in catalog["documents"].items() if entry["ready"]]
+    if not ready:
+        raise ValueError("Base vide : rien à indexer.")
+    if catalog.get("language"):
+        settings = lexical_settings(catalog["language"])
+    elif catalog.get("bm25") and (root / catalog["bm25"] / "contract.json").exists():
+        settings = read_json(root / catalog["bm25"] / "contract.json")["settings"]
+    else:
+        settings = lexical_settings(DEFAULT_LANGUAGE)
+    catalog["bm25"] = save_lexical_index(root, ready, settings)
+    write_json(root / CATALOG, catalog)
+    return catalog["bm25"]
+
+
 def ingest_document(source: str | Path, knowledge_dir: str | Path = "data/knowledge", *,
                     title: str | None = None, pdf_options=None, parent_scope: str = "section",
                     language: str | None = None):

@@ -18,10 +18,11 @@ from langgraph.graph import START, END, StateGraph, add_messages
 from langgraph.types import Send
 from pydantic import BaseModel, Field
 
-from docling_hybrid_rag.answer import SourcedAnswer, generate_answer, sourced_answer_markdown
+from docling_hybrid_rag.answer import SourcedAnswer, generate_answer, source_link, sourced_answer_markdown
 from docling_hybrid_rag.context import build_context
 from docling_hybrid_rag.retrieval import hybrid_retrieval, load_knowledge_base
 from docling_hybrid_rag.settings import get_encoder, get_llm
+from docling_hybrid_rag.usage import usage_entry
 from docling_hybrid_rag.verification import check_support, support_alert_markdown
 
 
@@ -35,6 +36,11 @@ def collect_themes(previous: list[dict], incoming: list[dict]) -> list[dict]:
     return [] if not incoming else [*(previous or []), *incoming]
 
 
+def collect_usage(previous: list[dict], incoming: list[dict] | None) -> list[dict]:
+    # Chaque appel au modèle ajoute son entrée. None, envoyé en début de tour, efface le tour précédent.
+    return [] if incoming is None else [*(previous or []), *incoming]
+
+
 class RagState(TypedDict, total=False):
     question: str
     messages: Annotated[list[BaseMessage], keep_last_three]
@@ -45,6 +51,7 @@ class RagState(TypedDict, total=False):
     route_reason: str
     sub_vectors: list[list[float]]
     themes: Annotated[list[dict], collect_themes]
+    usage: Annotated[list[dict], collect_usage]
     context: dict
     draft: dict
     support: dict
@@ -95,18 +102,22 @@ pour cette sous-question. Reformule-la pour une nouvelle recherche : emploie les
 du domaine, développe les acronymes, sans changer son sens ni ajouter de faits."""
 
 
-def decide_route(llm, messages):
+def decide_route(llm, messages, usage=None):
     router = llm.with_structured_output(RouteDecision, method="json_schema", strict=True, include_raw=True)
     result = router.invoke([SystemMessage(content=ROUTER_PROMPT), *messages])
+    if usage is not None:
+        usage.append(usage_entry("route_question", result["raw"]))
     if result["parsing_error"] or result["parsed"] is None:
         raise ValueError("Le modèle n'a pas produit une décision de routage exploitable.")
     return RouteDecision.model_validate(result["parsed"])
 
 
-def rewrite_query(llm, sub_question: str, failed_query: str) -> str:
+def rewrite_query(llm, sub_question: str, failed_query: str, usage=None) -> str:
     writer = llm.with_structured_output(RewriteDecision, method="json_schema", strict=True, include_raw=True)
     result = writer.invoke([SystemMessage(content=REWRITE_PROMPT), HumanMessage(
         content=f"Sous-question : {sub_question}\nDernière formulation essayée : {failed_query}")])
+    if usage is not None:
+        usage.append(usage_entry("search_theme", result["raw"]))
     if result["parsing_error"] or result["parsed"] is None:
         raise ValueError("Le modèle n'a pas produit une reformulation exploitable.")
     return RewriteDecision.model_validate(result["parsed"]).query
@@ -121,8 +132,16 @@ def split_budget(total: int, themes: int) -> list[int]:
 def create_workflow(knowledge_dir: str | Path = "data/knowledge", *, env_path: str | Path = ".env",
                     model: str | None = None, llm=None, encoder=None, reranker=None,
                     thesaurus=None, policy=None, relevance_threshold: float | None = None,
-                    max_rewrites: int = 1, verify: bool = True):
+                    max_rewrites: int = 1, verify: bool = True, memory: bool = True, checkpointer=None,
+                    link=source_link):
     """Créer un graphe avec mémoire RAM, isolée par config['configurable']['thread_id'].
+
+    - `memory=False` crée un graphe sans mémoire : aucun `thread_id`, aucun point de reprise gardé.
+      C'est le bon choix d'un serveur qui pose une question par appel. `checkpointer` remplace la
+      mémoire RAM par celui de votre choix (par exemple `SqliteSaver`).
+    - `link(source)` construit chaque citation de la réponse : `source_link` (lien HTML, par défaut)
+      ou `plain_citation` (texte seul). `result["sources"]` donne dans tous les cas les sources citées.
+    - `result["usage"]` liste, pour chaque appel au modèle, les jetons consommés.
 
     - `thesaurus` (dictionnaire ou chemin JSON) active l'expansion de requête de BM25.
     - `reranker` reclasse les parents candidats de chaque sous-question.
@@ -156,15 +175,16 @@ def create_workflow(knowledge_dir: str | Path = "data/knowledge", *, env_path: s
         if not isinstance(question, str) or not question.strip():
             raise ValueError("La question doit être une chaîne non vide.")
         # Seuls l'utilisateur et la réponse finale entrent dans messages, sans images ni prompts.
-        return {"messages": [HumanMessage(content=question)], "answer": "", "sources": {},
+        return {"messages": [HumanMessage(content=question)], "answer": "", "sources": {}, "usage": None,
                 "themes": [], "context": {"parents": [], "sources": {}}, "draft": {}, "support": {},
                 "route": "", "context_k": 0, "search_question": "", "sub_questions": [],
                 "sub_vectors": [], "route_reason": ""}
 
     def route_question(state):
-        decision = decide_route(model_client(), state["messages"])
+        usage = []
+        decision = decide_route(model_client(), state["messages"], usage)
         retrieve = decision.route == "retrieve"
-        return {"route": decision.route, "context_k": decision.context_k if retrieve else 0,
+        return {"usage": usage, "route": decision.route, "context_k": decision.context_k if retrieve else 0,
                 "search_question": decision.search_question,
                 "sub_questions": decision.sub_questions if retrieve else [], "route_reason": decision.reason}
 
@@ -172,7 +192,8 @@ def create_workflow(knowledge_dir: str | Path = "data/knowledge", *, env_path: s
         response = model_client().invoke([SystemMessage(content=DIRECT_PROMPT), *state["messages"]])
         if not response.text.strip() or response.response_metadata.get("status") == "incomplete":
             raise ValueError("Le modèle n'a pas produit une réponse directe complète.")
-        return {"answer": response.text, "messages": [AIMessage(content=response.text)]}
+        return {"answer": response.text, "messages": [AIMessage(content=response.text)],
+                "usage": [usage_entry("direct", response)]}
 
     def prepare_search(state):
         nonlocal knowledge
@@ -190,7 +211,7 @@ def create_workflow(knowledge_dir: str | Path = "data/knowledge", *, env_path: s
                 in enumerate(zip(state["sub_questions"], state["sub_vectors"], budgets))]
 
     def search_theme(task):
-        query, vector, rewrites = task["sub_question"], np.asarray(task["vector"]), []
+        query, vector, rewrites, usage = task["sub_question"], np.asarray(task["vector"]), [], []
         while True:
             with models_lock:
                 hits = hybrid_retrieval(query, knowledge, question_vector=vector, reranker=reranker,
@@ -199,12 +220,12 @@ def create_workflow(knowledge_dir: str | Path = "data/knowledge", *, env_path: s
                 hits["best_score"] is not None and hits["best_score"] >= relevance_threshold)
             if relevant or len(rewrites) >= max_rewrites:
                 break
-            query = rewrite_query(model_client(), task["sub_question"], query)
+            query = rewrite_query(model_client(), task["sub_question"], query, usage)
             rewrites.append(query)
             with models_lock:
                 vector = encode([query])[0]
         parent_ids = hits["parent_ids"] if relevant else []
-        return {"themes": [{
+        return {"usage": usage, "themes": [{
             "index": task["index"], "sub_question": task["sub_question"], "query": query,
             "rewrites": rewrites, "status": "found" if parent_ids else "not_found",
             "parent_ids": parent_ids, "best_score": hits["best_score"],
@@ -223,25 +244,26 @@ def create_workflow(knowledge_dir: str | Path = "data/knowledge", *, env_path: s
 
     def answer(state):
         themes = sorted(state["themes"], key=lambda theme: theme["index"])
-        context = state["context"]
+        context, usage = state["context"], []
         if context["parents"]:
             # La question autonome reprend la relance ; seules les sources de ce tour font preuve.
-            draft = generate_answer(state["search_question"], context, llm=model_client(), themes=themes)
+            draft = generate_answer(state["search_question"], context, llm=model_client(), themes=themes, usage=usage)
         else:
             missing = " ; ".join(theme["sub_question"] for theme in themes)
             draft = SourcedAnswer(paragraphs=[], missing_information=f"Aucun passage pertinent retrouvé pour : {missing}.")
-        return {"draft": draft.model_dump()}
+        return {"draft": draft.model_dump(), "usage": usage}
 
     def verify_answer(state):
         draft = SourcedAnswer.model_validate(state["draft"])
         sources = state["context"]["sources"]
-        text = sourced_answer_markdown(draft, sources)
-        report = check_support(state["search_question"], draft, sources, llm=model_client()) if verify else None
+        text = sourced_answer_markdown(draft, sources, link)
+        usage = []
+        report = check_support(state["search_question"], draft, sources, llm=model_client(), usage=usage) if verify else None
         alert = support_alert_markdown(report) if report else ""
         # L'alerte fait partie du message : le lecteur la voit avec la réponse.
         text = text + "\n\n" + alert if alert else text
         cited = {key for paragraph in draft.paragraphs for key in paragraph.source_ids}
-        return {"answer": text, "messages": [AIMessage(content=text)],
+        return {"usage": usage, "answer": text, "messages": [AIMessage(content=text)],
                 "support": report.model_dump() if report else {},
                 "sources": {key: sources[key] for key in cited}}
 
@@ -261,4 +283,6 @@ def create_workflow(knowledge_dir: str | Path = "data/knowledge", *, env_path: s
     graph.add_edge("merge", "answer")
     graph.add_edge("answer", "verify")
     graph.add_edge("verify", END)
-    return graph.compile(checkpointer=InMemorySaver())
+    if checkpointer is None and memory:
+        checkpointer = InMemorySaver()
+    return graph.compile(checkpointer=checkpointer)

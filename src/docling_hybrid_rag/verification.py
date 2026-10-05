@@ -12,6 +12,8 @@ from typing import Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from docling_hybrid_rag.usage import usage_entry
+
 
 class ParagraphCheck(BaseModel):
     paragraph: int = Field(description="Numéro du paragraphe vérifié, à partir de 1.")
@@ -75,7 +77,7 @@ def ground_quotes(report: SupportReport, answer, sources) -> SupportReport:
     return report
 
 
-def check_support(question, answer, sources, *, llm) -> SupportReport:
+def check_support(question, answer, sources, *, llm, usage=None) -> SupportReport:
     """Évaluer chaque paragraphe de `answer` (SourcedAnswer) face aux extraits de ses sources."""
     if not answer.paragraphs:
         return SupportReport(checks=[], alerts=[], suggestions=[])
@@ -90,6 +92,8 @@ def check_support(question, answer, sources, *, llm) -> SupportReport:
                 HumanMessage(content="Question : " + question + "\n\n" + "\n\n---\n\n".join(blocks))]
     checker = llm.with_structured_output(SupportReport, method="json_schema", strict=True, include_raw=True)
     result = checker.invoke(messages)
+    if usage is not None:
+        usage.append(usage_entry("verify", result["raw"]))
     if result["parsing_error"] or result["parsed"] is None:
         raise ValueError("Le modèle n'a pas produit un contrôle de soutien exploitable.")
     report = ground_quotes(SupportReport.model_validate(result["parsed"]), answer, sources)

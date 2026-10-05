@@ -43,6 +43,19 @@ def get_reranker():
     return CrossEncoder(RERANKER_MODEL_ID, revision=RERANKER_REVISION, max_length=512, device="cpu")
 
 
+def release_models() -> None:
+    """Libérer l'encodeur BGE-M3 et le reranker (environ 2 Go chacun) : ils se rechargeront au prochain appel.
+
+    Pour un serveur qui cherche rarement dans des PDF. Pour partager une seule instance entre plusieurs
+    graphes, passer `encoder=` et `reranker=` à `create_workflow`.
+    """
+    import gc
+
+    get_encoder.cache_clear()
+    get_reranker.cache_clear()
+    gc.collect()
+
+
 def get_llm(env_path: str | Path = ".env", model: str | None = None):
     from langchain_openai import ChatOpenAI
 

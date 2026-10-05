@@ -16,6 +16,9 @@ from docling_hybrid_rag.verification import SupportReport, check_support
 from docling_hybrid_rag.workflow import RewriteDecision, RouteDecision, create_workflow, split_budget
 
 
+USAGE = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+
+
 def conversation(name):
     return {"configurable": {"thread_id": name}}
 
@@ -48,12 +51,12 @@ class ScriptedLLM:
 
         def invoke(messages):
             self.calls[key].append(messages)
-            return {"parsed": self.queues[key].pop(0), "parsing_error": None, "raw": AIMessage(content="")}
+            return {"parsed": self.queues[key].pop(0), "parsing_error": None, "raw": AIMessage(content="", usage_metadata=USAGE)}
         return SimpleNamespace(invoke=invoke)
 
     def invoke(self, messages):
         self.direct_calls.append(messages)
-        return AIMessage(content=self.direct_answers.pop(0))
+        return AIMessage(content=self.direct_answers.pop(0), usage_metadata=USAGE)
 
 
 class UnitEncoder:
@@ -294,6 +297,80 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             graph.invoke({"question": "Bonjour"})
         self.assertEqual(llm.routing_calls, [])
+
+
+class ApplicationUseTests(unittest.TestCase):
+    """Usage dans une application : jetons comptés, serveur sans mémoire, citations sans HTML (retours de Knowledge Manager)."""
+
+    def invoke(self, llm, question, *, config=None, answer=None, sources=None, **options):
+        graph = create_workflow(llm=llm, encoder=UnitEncoder(), **options)
+        draft = answer or SourcedAnswer(paragraphs=[], missing_information="Preuves insuffisantes.")
+        context = {"parents": [{"parent_id": "p1", "text": "Texte p1", "images": []}], "sources": sources or {}}
+        with patch("docling_hybrid_rag.workflow.load_knowledge_base", return_value=object()), \
+             patch("docling_hybrid_rag.workflow.hybrid_retrieval", return_value=search_result(["p1"])), \
+             patch("docling_hybrid_rag.workflow.build_context", return_value=context), \
+             patch("docling_hybrid_rag.workflow.generate_answer", return_value=draft):
+            return graph.invoke({"question": question}, config)
+
+    def test_each_model_call_reports_its_tokens_and_the_list_is_reset_every_turn(self):
+        from docling_hybrid_rag.usage import total_usage
+
+        llm = ScriptedLLM([decision("direct"), decision("direct")], ["Bonjour !", "Encore bonjour."])
+        graph = create_workflow(llm=llm)
+        first = graph.invoke({"question": "Salut"}, conversation("u"))
+        self.assertEqual([entry["node"] for entry in first["usage"]], ["route_question", "direct"])
+        self.assertEqual(total_usage(first["usage"]), {"input_tokens": 200, "output_tokens": 40, "total_tokens": 240})
+        second = graph.invoke({"question": "Re"}, conversation("u"))
+        self.assertEqual(len(second["usage"]), 2, "les jetons du tour précédent ne s'ajoutent pas")
+
+    def test_retrieval_turn_counts_the_router_and_the_support_check(self):
+        sources = {"p1": {"parent_id": "p1", "document_title": "Guide", "name": "Section", "pages": [1],
+                          "text": "A", "ref": None, "source_url": "file:///guide.pdf"}}
+        answer = SourcedAnswer(paragraphs=[{"text": "A", "source_ids": ["p1"]}], missing_information="")
+        llm = ScriptedLLM([decision("retrieve")], reports=[supported(1)])
+        result = self.invoke(llm, "Question documentaire", config=conversation("r"), answer=answer, sources=sources)
+        # La réponse (patchée ici) compterait aussi : le routeur et le contrôle sont les appels réels de ce test.
+        self.assertEqual([entry["node"] for entry in result["usage"]], ["route_question", "verify"])
+
+    def test_usage_without_provider_metadata_is_zero_not_missing(self):
+        from docling_hybrid_rag.usage import usage_entry
+
+        self.assertEqual(usage_entry("verify", AIMessage(content="")),
+                         {"node": "verify", "model": None, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+
+    def test_a_graph_without_memory_needs_no_thread_id_and_keeps_nothing(self):
+        llm = ScriptedLLM([decision("direct"), decision("direct")], ["Un", "Deux"])
+        graph = create_workflow(llm=llm, memory=False)
+        graph.invoke({"question": "Première"})
+        graph.invoke({"question": "Seconde"})
+        # Le routeur ne voit que la question du tour, jamais l'échange précédent.
+        self.assertEqual([[m.content for m in call[1:]] for call in llm.routing_calls], [["Première"], ["Seconde"]])
+
+    def test_a_custom_checkpointer_replaces_the_ram_memory(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        saver = InMemorySaver()
+        llm = ScriptedLLM([decision("direct")], ["Réponse."])
+        create_workflow(llm=llm, checkpointer=saver).invoke({"question": "Salut"}, conversation("c"))
+        self.assertTrue(list(saver.list(conversation("c"))))
+
+    def test_plain_citations_leave_no_html_and_sources_stay_available(self):
+        from docling_hybrid_rag.answer import plain_citation
+
+        sources = {"p1": {"parent_id": "p1", "document_title": "Guide", "name": "3.b. Mack", "pages": [26, 27],
+                          "text": "Texte", "ref": None, "source_url": "file:///C:/base/source.pdf"}}
+        answer = SourcedAnswer(paragraphs=[{"text": "Mack mesure l'incertitude.", "source_ids": ["p1"]}],
+                               missing_information="")
+        html = self.invoke(ScriptedLLM([decision("retrieve")], reports=[supported(1)]), "Q", config=conversation("h"),
+                           answer=answer, sources=sources)
+        plain = self.invoke(ScriptedLLM([decision("retrieve")], reports=[supported(1)]), "Q", config=conversation("p"),
+                            answer=answer, sources=sources, link=plain_citation)
+        self.assertIn('<a href="file:///C:/base/source.pdf#page=26"', html["answer"])
+        self.assertNotIn("<a ", plain["answer"])
+        self.assertNotIn("file:///", plain["answer"])
+        self.assertIn("Guide, 3.b. Mack, pp. 26 à 27", plain["answer"])
+        self.assertEqual(set(plain["sources"]), {"p1"})
+        self.assertEqual(plain["sources"]["p1"]["pages"], [26, 27])
 
 
 if __name__ == "__main__":

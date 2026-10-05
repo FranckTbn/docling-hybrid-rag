@@ -5,6 +5,7 @@ from html import escape
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 from docling_hybrid_rag.context import parent_content_blocks
+from docling_hybrid_rag.usage import usage_entry
 
 class CitedParagraph(BaseModel):
     text: str = Field(description="Un paragraphe en français, sans lien ni citation ajoutée au texte.")
@@ -84,19 +85,31 @@ def citation_schema(sources, max_paragraphs=2):
     return schema
 
 
-def source_link(source):
+def citation_label(source):
+    """Texte d'une citation : document, section ou objet, pages."""
     pages = source["pages"]
     if not pages:
         raise ValueError("Une source PDF doit conserver sa page.")
     location = f"p. {pages[0]}" if len(pages) == 1 else f"pp. {pages[0]} à {pages[-1]}"
-    label = f'{source["document_title"]}, {source["name"]}, {location}'
-    return f'<a href="{escape(source["source_url"], quote=True)}#page={pages[0]}" target="_blank" rel="noopener">{escape(label)}</a>'
+    return f'{source["document_title"]}, {source["name"]}, {location}'
 
 
-def sourced_answer_markdown(answer, sources):
+def source_link(source):
+    """Citation avec un lien HTML vers la page du PDF (comportement par défaut)."""
+    label = citation_label(source)
+    return f'<a href="{escape(source["source_url"], quote=True)}#page={source["pages"][0]}" target="_blank" rel="noopener">{escape(label)}</a>'
+
+
+def plain_citation(source):
+    """Citation sans lien ni HTML : pour une application qui construit elle-même ses liens depuis `result["sources"]`."""
+    return escape(citation_label(source))
+
+
+def sourced_answer_markdown(answer, sources, link=source_link):
+    """Réponse en Markdown. `link(source)` construit chaque citation : `source_link` (HTML) ou `plain_citation` (texte)."""
     paragraphs = []
     for paragraph in answer.paragraphs:
-        links = " ; ".join(source_link(sources[key]) for key in dict.fromkeys(paragraph.source_ids))
+        links = " ; ".join(link(sources[key]) for key in dict.fromkeys(paragraph.source_ids))
         text = paragraph.text.replace(r"\(", "$").replace(r"\)", "$")
         paragraphs.append(escape(text) + "\n\n" + links)
     if answer.missing_information.strip():
@@ -104,7 +117,7 @@ def sourced_answer_markdown(answer, sources):
     return "\n\n".join(paragraphs)
 
 
-def generate_answer(question, context, *, llm, themes=None):
+def generate_answer(question, context, *, llm, themes=None, usage=None):
     sources = context["sources"]
     if not context["parents"]:
         return SourcedAnswer(paragraphs=[], missing_information="Aucun contexte documentaire disponible.")
@@ -116,6 +129,8 @@ def generate_answer(question, context, *, llm, themes=None):
     result = structured_llm.invoke(messages)
     if result["parsing_error"] or result["parsed"] is None:
         raise ValueError("Le modèle n'a pas produit une réponse exploitable.")
+    if usage is not None:
+        usage.append(usage_entry("answer", result["raw"]))
     metadata = result["raw"].response_metadata
     if metadata.get("status") == "incomplete" or metadata.get("finish_reason") == "length":
         raise ValueError("La réponse a été interrompue.")

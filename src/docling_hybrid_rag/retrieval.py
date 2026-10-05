@@ -2,6 +2,7 @@
 fusion RRF, puis reranking facultatif des parents candidats."""
 
 import json
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property
@@ -70,12 +71,36 @@ def load_knowledge_base(knowledge_dir: str | Path = "data/knowledge") -> Knowled
     index_dir = root / catalog["bm25"]
     contract = read_json(index_dir / "contract.json")
     if (contract["texts"] != [c.page_content for c in children]
-        or contract["child_ids"] != [c.metadata["child_id"] for c in children]
-        or contract["versions"] != {name: version(name) for name in ("bm25s", "PyStemmer")}):
-        raise ValueError("L'index BM25 ne correspond plus aux enfants ; réindexer la base.")
+        or contract["child_ids"] != [c.metadata["child_id"] for c in children]):
+        raise ValueError("L'index BM25 ne correspond plus aux enfants ; appeler reindex(knowledge_dir).")
+    versions = {name: version(name) for name in ("bm25s", "PyStemmer")}
+    if contract["versions"] != versions:
+        # Base copiée d'un autre environnement : l'index se refait sans toucher aux enfants ni aux vecteurs.
+        from docling_hybrid_rag.ingestion import reindex
+
+        warnings.warn(f"L'index BM25 avait été construit avec {contract['versions']} ; il est reconstruit "
+                      f"avec {versions}.", stacklevel=2)
+        index_dir = root / reindex(root)
+        contract = read_json(index_dir / "contract.json")
     index = bm25s.BM25.load(str(index_dir), load_corpus=False, show_progress=False)
     return KnowledgeBase(root, parents, children, np.concatenate(matrices), index, records,
                          contract["settings"])
+
+
+def document_passages(knowledge_base: KnowledgeBase, document: str) -> list[dict]:
+    """Les parents d'un document, dans l'ordre de lecture : section, pages et texte.
+
+    `document` est l'identifiant du document dans la base ou son titre. Rien n'est rechargé depuis le disque.
+    """
+    ids = {key for key, record in knowledge_base.records.items() if document in (key, record["title"])}
+    if not ids:
+        raise ValueError(f"{document!r} n'est pas dans la base.")
+    return [{"parent_id": parent.metadata["parent_id"], "document_id": parent.metadata["document_id"],
+             "document_title": parent.metadata["document_title"], "heading_path": parent.metadata["heading_path"],
+             "pages": parent.metadata["pages"], "page_start": parent.metadata["page_start"],
+             "page_end": parent.metadata["page_end"], "token_count": parent.metadata["token_count"],
+             "text": parent.page_content}
+            for parent in knowledge_base.parents if parent.metadata["document_id"] in ids]
 
 
 def encode_question(question: str, knowledge_base: KnowledgeBase, *, encoder=None) -> np.ndarray:
