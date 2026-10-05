@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from docling_hybrid_rag.indexing import save_lexical_index
+from docling_hybrid_rag.indexing import DEFAULT_LANGUAGE, lexical_settings, save_lexical_index
 from docling_hybrid_rag.settings import get_encoder, get_tokenizer, EMBEDDING_MODEL_ID, DENSE_REVISION, CHILD_MAX_TOKENS
 from docling_hybrid_rag.storage import children_sha256, load_chunks, load_vectors
 from docling_hybrid_rag.store import (
@@ -89,14 +89,23 @@ def ensure_embeddings(directory: str | Path, *, encoder=None) -> np.ndarray:
 
 
 def ingest_document(source: str | Path, knowledge_dir: str | Path = "data/knowledge", *,
-                    title: str | None = None, pdf_options=None, parent_scope: str = "section"):
-    """Parser, découper et indexer un PDF, puis le rendre interrogeable."""
+                    title: str | None = None, pdf_options=None, parent_scope: str = "section",
+                    language: str | None = None):
+    """Parser, découper et indexer un PDF, puis le rendre interrogeable.
+
+    `language` (`fr`, `en`, `de`, `es`, `it`, `pt`) règle les mots courants et la racinisation de BM25.
+    Elle est fixée à la création de la base (français par défaut) et se retrouve ensuite d'elle-même.
+    """
     from docling_hybrid_rag.parsing import (
         PARSING, build_document_converter, load_parsed_document, parse_document, parsing_inputs,
         save_parsed_document,
     )
 
     root = Path(knowledge_dir).resolve()
+    known = read_catalog(root).get("language")
+    if language and known and language != known:
+        raise ValueError(f"Cette base est en {known!r} : BM25 ne peut pas mélanger {language!r}. Créer une autre base.")
+    settings = lexical_settings(language or known or DEFAULT_LANGUAGE)
     directory = add_source(source, root, title=title)
     document_id = directory.name
 
@@ -112,7 +121,8 @@ def ingest_document(source: str | Path, knowledge_dir: str | Path = "data/knowle
     catalog = read_catalog(root)
     catalog["documents"][document_id]["ready"] = True
     ready = [key for key, entry in catalog["documents"].items() if entry["ready"]]
-    catalog["bm25"] = save_lexical_index(root, ready)
+    catalog["language"] = language or known or DEFAULT_LANGUAGE
+    catalog["bm25"] = save_lexical_index(root, ready, settings)
     write_json(root / CATALOG, catalog)
     return {"document_id": document_id, **catalog["documents"][document_id],
             "parents": len(parents), "children": len(children), "directory": str(directory)}

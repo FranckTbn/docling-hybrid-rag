@@ -2,8 +2,8 @@
 
 Le texte d'un enfant contient déjà les titres de sa section : un nom de méthode
 présent dans le titre est donc retrouvé dans chacun de ses enfants. La
-racinisation française rapproche les variantes d'un mot (« provisions »,
-« provision ») et les mots courants du français sont ignorés.
+racinisation rapproche les variantes d'un mot (« provisions », « provision ») et les
+mots courants de la langue de la base sont ignorés (français par défaut).
 """
 
 import json
@@ -18,7 +18,25 @@ import Stemmer
 from docling_hybrid_rag.storage import load_chunks
 from docling_hybrid_rag.store import write_json
 
-LEXICAL_SETTINGS = {"stopwords": "fr", "stemmer": "french"}
+DEFAULT_LANGUAGE = "fr"
+# Mots courants et racinisation par langue de la base. BM25 ne traduit rien : une base se tient dans la
+# langue de ses documents, sinon la racinisation d'une langue abîme les mots de l'autre.
+LANGUAGES = {
+    "fr": {"stopwords": "fr", "stemmer": "french"},
+    "en": {"stopwords": "en", "stemmer": "english"},
+    "de": {"stopwords": "de", "stemmer": "german"},
+    "es": {"stopwords": "es", "stemmer": "spanish"},
+    "it": {"stopwords": "it", "stemmer": "italian"},
+    "pt": {"stopwords": "pt", "stemmer": "portuguese"},
+}
+LEXICAL_SETTINGS = LANGUAGES[DEFAULT_LANGUAGE]
+
+
+def lexical_settings(language: str = DEFAULT_LANGUAGE) -> dict:
+    """Règles de tokenisation BM25 d'une langue (`fr`, `en`, `de`, `es`, `it`, `pt`)."""
+    if language not in LANGUAGES:
+        raise ValueError(f"Langue inconnue : {language!r}. Choisir parmi {', '.join(LANGUAGES)}.")
+    return dict(LANGUAGES[language])
 
 
 def lexical_tokens(texts, settings=LEXICAL_SETTINGS, *, return_ids=True):

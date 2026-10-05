@@ -5,9 +5,9 @@ Les questions, les sections attendues et les PDF viennent de https://huggingface
 
 Étapes, à lancer l'une après l'autre (un modèle lourd à la fois sur un PC de 8 Go) :
 
-    python benchmarks/open_rag_bench.py download   # questions, sections attendues, PDF (pause entre deux requêtes arXiv)
-    python benchmarks/open_rag_bench.py ingest     # parse, découpe et indexe chaque PDF
-    python benchmarks/open_rag_bench.py evaluate   # BM25, dense, RRF, reranker facultatif
+    python -m docling_hybrid_rag.benchmarks.open_rag_bench download   # questions, sections attendues, PDF (pause entre deux requêtes arXiv)
+    python -m docling_hybrid_rag.benchmarks.open_rag_bench ingest     # parse, découpe et indexe chaque PDF
+    python -m docling_hybrid_rag.benchmarks.open_rag_bench evaluate   # BM25, dense, RRF, reranker facultatif
 
 Chaque étape reprend où elle s'est arrêtée. `--data-dir` reçoit les fichiers du benchmark, `--knowledge-dir` la base.
 """
@@ -18,7 +18,9 @@ import time
 import urllib.request
 from pathlib import Path
 
-HF = "https://huggingface.co/datasets/vectara/open_ragbench/resolve/main/pdf/arxiv"
+# Version figée du jeu de données : les mêmes fichiers pour tout le monde, quoi qu'il arrive ensuite au jeu.
+REVISION = "63f6b052ff83508b08e242db42263ee708815c26"
+HF = f"https://huggingface.co/datasets/vectara/open_ragbench/resolve/{REVISION}/pdf/arxiv"
 # Dix articles de 8 à 24 pages, dix questions chacun, avec des tableaux et des figures dans leurs questions.
 DOCUMENTS = ["2410.14077v2", "2407.18337v4", "2408.02322v2", "2410.08642v2", "2410.08147v8",
              "2405.05998v3", "2412.18252v2", "2409.02603v3", "2409.13674v3", "2410.11074v3"]
@@ -69,7 +71,8 @@ def ingest(data_dir: Path, knowledge_dir: Path, documents: list[str], scope: str
     for document in documents:
         started = time.perf_counter()
         record = ingest_document(data_dir / "pdfs" / f"{document}.pdf", knowledge_dir, title=document,
-                                 pdf_options=light_options(), parent_scope=scope)
+                                 pdf_options=light_options(), parent_scope=scope,
+                                 language="en")
         print(f"{document}: {record['parents']} parents, {record['children']} enfants, "
               f"{time.perf_counter() - started:.0f} s", flush=True)
 
@@ -121,7 +124,10 @@ def evaluate(data_dir: Path, knowledge_dir: Path, documents: list[str], scopes: 
 
     vectors = {c["query_id"]: encode_question(c["question"], knowledge) for c in alignable}
     reranker = get_reranker() if reranker_questions else None
-    results = {"questions": len(cases), "alignable": len(alignable), "scopes": {}}
+    from docling_hybrid_rag.benchmarks import environment
+
+    results = {"environment": environment(dataset="vectara/open_ragbench", dataset_revision=REVISION),
+               "questions": len(cases), "alignable": len(alignable), "scopes": {}}
     for scope in scopes:
         base = knowledge if scope == "section" else with_parent_scope(knowledge, knowledge_dir, scope)
         parents = base.parents

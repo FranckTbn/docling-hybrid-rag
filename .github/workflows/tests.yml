@@ -10,7 +10,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: python -m pip install -e ".[test]"
+      - run: python -m pip install -e ".[test,benchmarks]"
       - run: python -m unittest discover -s tests -v
         env:
           HF_HUB_OFFLINE: '1'

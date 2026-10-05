@@ -152,9 +152,9 @@ BM25 est construit pendant l'ingestion sur les enfants de toute la base, avec le
 La méthode est mesurée sur [Open RAG Benchmark](https://huggingface.co/datasets/vectara/open_ragbench) de Vectara : des articles arXiv au format PDF, des questions rédigées d'après une section précise, et la section attendue pour chacune (licence CC BY-NC 4.0, usage non commercial : les données ne sont pas dans ce dépôt). Dix articles de 8 à 24 pages, cent questions dont 45 portent sur du texte seul et 55 sur des tableaux ou des figures, sont ingérés dans une même base de 649 enfants.
 
 ```bash
-python benchmarks/open_rag_bench.py download   # questions, sections attendues, PDF (pause entre deux requêtes arXiv)
-python benchmarks/open_rag_bench.py ingest     # parse, découpe et indexe les dix PDF
-python benchmarks/open_rag_bench.py evaluate   # BM25, dense, RRF, avec la portée des parents « section » puis « elements »
+python -m docling_hybrid_rag.benchmarks.open_rag_bench download   # questions, sections attendues, PDF (pause entre deux requêtes arXiv)
+python -m docling_hybrid_rag.benchmarks.open_rag_bench ingest     # parse, découpe et indexe les dix PDF
+python -m docling_hybrid_rag.benchmarks.open_rag_bench evaluate   # BM25, dense, RRF, avec la portée des parents « section » puis « elements »
 ```
 
 Un parent est jugé pertinent s'il partage assez de suites de quatre mots avec la section attendue : la mesure ne dépend pas du parsing. Les intervalles sont à 95 %, par rééchantillonnage des cent questions.
@@ -175,7 +175,7 @@ Limites : dix documents sans documents voisins en distracteurs rendent la recher
 | Configurer, parser, sauvegarder et recharger | `src/docling_hybrid_rag/parsing.py` |
 | Construire les parents et les enfants | `src/docling_hybrid_rag/chunking.py` |
 | Mesurer la recherche sur des questions annotées (références Docling) | `src/docling_hybrid_rag/evaluation.py` |
-| Mesurer la recherche sur un benchmark public (passages de texte) | `src/docling_hybrid_rag/passage_evaluation.py`, `benchmarks/open_rag_bench.py` |
+| Mesurer la recherche sur un benchmark public (passages de texte) | `src/docling_hybrid_rag/passage_evaluation.py`, `src/docling_hybrid_rag/benchmarks/open_rag_bench.py` |
 | Expansion de requête par thésaurus | `src/docling_hybrid_rag/expansion.py`, `src/docling_hybrid_rag/indexing.py` |
 | Contrôle de soutien et alertes | `src/docling_hybrid_rag/verification.py` |
 | Enrichir la base et reprendre les calculs | `src/docling_hybrid_rag/ingestion.py`, `src/docling_hybrid_rag/store.py` |

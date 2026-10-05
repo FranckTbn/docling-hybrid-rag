@@ -127,6 +127,32 @@ class PipelineTests(unittest.TestCase):
         self.assertGreaterEqual(len(rechunked.parents), sections)
         self.assertEqual(len(rechunked.children), len(base.children))
 
+    def test_the_base_language_sets_bm25_and_cannot_be_mixed(self):
+        from docling_hybrid_rag.indexing import lexical_settings, lexical_tokens
+
+        self.ingest(language="en")
+        base = load_knowledge_base(self.data)
+        self.assertEqual(base.lexical_settings, lexical_settings("en"))
+        self.assertEqual(read_catalog(self.data)["language"], "en")
+        # La racinisation anglaise rapproche « running tests » de « run test », pas la française.
+        self.assertEqual(lexical_tokens("running tests", base.lexical_settings, return_ids=False)[0],
+                         lexical_tokens("run test", base.lexical_settings, return_ids=False)[0])
+        # Une ingestion suivante sans langue garde celle de la base ; une autre langue est refusée.
+        self.ingest()
+        self.assertEqual(load_knowledge_base(self.data).lexical_settings, lexical_settings("en"))
+        with self.assertRaisesRegex(ValueError, "mélanger"):
+            self.ingest(language="fr")
+        with self.assertRaisesRegex(ValueError, "Langue inconnue"):
+            lexical_settings("xx")
+
+    def test_chunks_record_their_pages(self):
+        self.ingest()
+        base = load_knowledge_base(self.data)
+        for item in [*base.parents, *base.children]:
+            self.assertTrue(item.metadata["pages"])
+        for parent in base.parents:
+            self.assertEqual(parent.metadata["page_start"], min(parent.metadata["pages"]))
+
     def test_speed_settings_do_not_invalidate_parsing(self):
         self.ingest()
         options = default_pdf_options()

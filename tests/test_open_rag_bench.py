@@ -1,6 +1,6 @@
 """Contrôle de non-régression sur une base de dix PDF réels (Open RAG Benchmark, articles arXiv).
 
-Facultatif : la base se prépare avec `benchmarks/open_rag_bench.py` (téléchargement, ingestion), puis
+Facultatif : la base se prépare avec `python -m docling_hybrid_rag.benchmarks.open_rag_bench` (téléchargement, ingestion), puis
 
     RAG_BENCHMARK_DIR=data/benchmarks/open-rag-bench-arxiv python -m unittest tests.test_open_rag_bench -v
 
@@ -8,13 +8,12 @@ Les seuils sont des planchers sous les résultats mesurés, avec l'incertitude d
 détectent une régression, ils ne mesurent pas la qualité de la méthode.
 """
 
-import importlib.util
+import importlib
 import os
 import unittest
 from pathlib import Path
 
 BENCHMARK_DIR = os.getenv("RAG_BENCHMARK_DIR")
-SCRIPT = Path(__file__).resolve().parents[1] / "benchmarks" / "open_rag_bench.py"
 
 
 @unittest.skipUnless(BENCHMARK_DIR, "Base de dix PDF facultative : définir RAG_BENCHMARK_DIR.")
@@ -25,9 +24,7 @@ class TenPdfBenchmarkTests(unittest.TestCase):
         from docling_hybrid_rag.passage_evaluation import evaluate_ranking, rank_all_variants, summarize
         from docling_hybrid_rag.retrieval import encode_question
 
-        spec = importlib.util.spec_from_file_location("open_rag_bench", SCRIPT)
-        cls.bench = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.bench)
+        cls.bench = importlib.import_module("docling_hybrid_rag.benchmarks.open_rag_bench")
         data_dir = Path(BENCHMARK_DIR)
         cls.knowledge = load_knowledge_base(data_dir / "knowledge")
         cls.cases = cls.bench.build_cases(data_dir, cls.bench.DOCUMENTS)
