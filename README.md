@@ -4,6 +4,27 @@ Le code à exécuter pour accompagner l'article **Construire un RAG documentaire
 
 Les fonctions reprennent son pipeline : Docling conserve la structure, les parents regroupent les sections, les enfants servent à la recherche. BM25 et BGE-M3 recherchent tous deux les enfants, puis chaque enfant est remonté à son parent avant la fusion RRF. Le LLM choisit de répondre directement ou de rechercher, découpe la demande en sous-questions et fixe un budget de 3, 5 ou 7 parents. Chaque sous-question a sa propre recherche. Le modèle reçoit les parents retenus avec leurs images, répond avec des citations lisibles, puis un contrôle signale les paragraphes mal soutenus par leurs sources.
 
+## Utiliser la bibliothèque dans un autre projet
+
+Dans l'environnement virtuel de votre projet (Python 3.12 ou supérieur) :
+
+```bash
+python -m pip install "docling-hybrid-rag @ git+https://github.com/FranckTbn/docling-hybrid-rag.git"
+```
+
+```python
+from docling_hybrid_rag import ingest_document, hybrid_retrieval, load_knowledge_base, build_context
+
+for pdf in ["rapport-1.pdf", "rapport-2.pdf"]:          # autant de PDF que vous voulez, un par un
+    ingest_document(pdf, "ma_base", title=pdf)
+
+base = load_knowledge_base("ma_base")
+hits = hybrid_retrieval("Quelle est la conclusion du rapport 2 ?", base)
+context = build_context(hits["parent_ids"], base)         # textes, images et sources citables
+```
+
+La recherche, le contexte et les citations fonctionnent sans clé API : seul le workflow `create_workflow` appelle un LLM. Une même base accepte plusieurs PDF ; chaque passage garde le document dont il vient.
+
 ## Démarrer
 
 Python **3.12 ou supérieur**, Git et un environnement virtuel sont nécessaires. Le notebook se lance depuis la racine du dépôt.
@@ -126,12 +147,35 @@ context = build_context(hits["parent_ids"], base)
 
 BM25 est construit pendant l'ingestion sur les enfants de toute la base, avec les mots courants français ignorés et une racinisation française (« provisions » retrouve « provision »), puis sauvegardé. Le texte d'un enfant contient les titres de sa section. Les deux index sont rechargés sans réencodage ; seule une nouvelle question est encodée. Les vingt enfants candidats de chaque canal sont ramenés à des parents distincts avant RRF (constante 60) ; chaque parent garde son meilleur enfant dans chaque canal. L'appel direct à `hybrid_retrieval` garde par défaut trois parents, avec toutes leurs figures conservées. Dans le workflow, le LLM transmet son choix de 3, 5 ou 7 via `context_k`.
 
+## Mesure sur dix PDF réels
+
+La méthode est mesurée sur [Open RAG Benchmark](https://huggingface.co/datasets/vectara/open_ragbench) de Vectara : des articles arXiv au format PDF, des questions rédigées d'après une section précise, et la section attendue pour chacune (licence CC BY-NC 4.0, usage non commercial : les données ne sont pas dans ce dépôt). Dix articles de 8 à 24 pages, cent questions dont 45 portent sur du texte seul et 55 sur des tableaux ou des figures, sont ingérés dans une même base de 649 enfants.
+
+```bash
+python benchmarks/open_rag_bench.py download   # questions, sections attendues, PDF (pause entre deux requêtes arXiv)
+python benchmarks/open_rag_bench.py ingest     # parse, découpe et indexe les dix PDF
+python benchmarks/open_rag_bench.py evaluate   # BM25, dense, RRF, avec la portée des parents « section » puis « elements »
+```
+
+Un parent est jugé pertinent s'il partage assez de suites de quatre mots avec la section attendue : la mesure ne dépend pas du parsing. Les intervalles sont à 95 %, par rééchantillonnage des cent questions.
+
+| Parents (3 premiers) | Section attendue retrouvée | Part de la section dans le contexte | Taille du contexte |
+|---|---|---|---|
+| Sections (192 parents) | 0,87 [0,80 à 0,93] | 0,67 [0,61 à 0,73] | 3 400 tokens |
+| Éléments (522 parents) | 0,86 [0,79 à 0,93] | 0,42 [0,36 à 0,48] | 1 150 tokens |
+
+Avec RRF, le bon document est toujours parmi les trois premiers parents et la bonne section l'est dans 87 % des cas (95 % parmi les cinq premiers). BM25 et le dense seuls obtiennent des résultats voisins, et leur fusion RRF est au même niveau ou un peu au-dessus : avec cent questions, les intervalles se recouvrent et aucun moteur ne se détache. Les parents « section » ne retrouvent pas plus souvent la section, mais ils mettent beaucoup plus de son contenu sous les yeux du modèle, surtout quand la question porte sur un tableau ou une figure voisins du passage (part couverte 0,56 contre 0,22 pour les questions texte, tableau et figure). Ce contexte coûte environ trois fois plus de tokens.
+
+Limites : dix documents sans documents voisins en distracteurs rendent la recherche de document facile ; les questions sont écrites par un LLM d'après chaque section, donc plus proches du texte qu'une vraie demande ; la mesure ne juge ni la réponse du modèle ni les citations. Lancer `RAG_BENCHMARK_DIR=data/benchmarks/open-rag-bench-arxiv python -m unittest tests.test_open_rag_bench` vérifie que ces planchers tiennent après une modification.
+
 ## Correspondance avec l'article
 
 | Partie de l'article | Code du dépôt |
 |---|---|
 | Configurer, parser, sauvegarder et recharger | `src/docling_hybrid_rag/parsing.py` |
 | Construire les parents et les enfants | `src/docling_hybrid_rag/chunking.py` |
+| Mesurer la recherche sur des questions annotées (références Docling) | `src/docling_hybrid_rag/evaluation.py` |
+| Mesurer la recherche sur un benchmark public (passages de texte) | `src/docling_hybrid_rag/passage_evaluation.py`, `benchmarks/open_rag_bench.py` |
 | Expansion de requête par thésaurus | `src/docling_hybrid_rag/expansion.py`, `src/docling_hybrid_rag/indexing.py` |
 | Contrôle de soutien et alertes | `src/docling_hybrid_rag/verification.py` |
 | Enrichir la base et reprendre les calculs | `src/docling_hybrid_rag/ingestion.py`, `src/docling_hybrid_rag/store.py` |
@@ -140,7 +184,7 @@ BM25 est construit pendant l'ingestion sur les enfants de toute la base, avec le
 | Prompt, réponse structurée, citations | `src/docling_hybrid_rag/answer.py` |
 | Preuve nécessaire, branches et `invoke` | `src/docling_hybrid_rag/workflow.py` |
 
-Les adaptations concernent les arguments des fonctions, les identifiants distincts entre PDF, les chemins portables et la persistance. Le parsing, les sections entières comme parents, les enfants autour de 400 tokens et les 20 candidats par canal restent ceux de l'article. Le workflow ajoute un routeur LLM et une mémoire courte ; son budget de 3, 5 ou 7 parents prolonge la démonstration de l'article à trois parents fixes. Les tableaux et formules ne sont pas coupés : 400 est une cible souple, pas une limite stricte ni un optimum démontré.
+Les adaptations concernent les arguments des fonctions, les identifiants distincts entre PDF, les chemins portables et la persistance. Le parsing, les enfants autour de 400 tokens et les 20 candidats par canal restent ceux de l'article. Le workflow ajoute un routeur LLM et une mémoire courte ; son budget de 3, 5 ou 7 parents prolonge la démonstration de l'article à trois parents fixes. Un enfant ne dépasse pas 400 tokens : un tableau trop long est donc coupé entre ses lignes en plusieurs enfants, mais son parent le contient en entier. Ce budget n'est pas un optimum démontré.
 
 ## Vérifications et limites
 
@@ -150,11 +194,11 @@ python -m unittest discover -s tests -v
 
 Les tests hors ligne exercent les identifiants, la reprise d'ingestion, les frontières des enfants, RRF, la provenance et les branches du vrai graphe avec un modèle de test. Ils n'établissent pas la qualité actuarielle d'une réponse. Les résultats réels du guide sont vérifiés séparément par rapport à l'article ; ils ne sont pas distribués comme réponses universelles.
 
-Sur le guide, le chunking du package reproduit exactement celui de l'article : 187 parents et 397 enfants identiques (`tests/test_article_parity.py`, avec `RAG_ARTICLE_DIR`). Une génération réelle a aussi montré une imprécision sur la MSEP, commentée dans l'article : des références valides ne suffisent pas à garantir une interprétation correcte.
+Sur le guide, `tests/test_article_parity.py` (avec `RAG_ARTICLE_DIR`) refait le chunking et le compare aux chunks enregistrés de l'article. Le chunking garantit, et les tests vérifient, qu'aucun enfant n'est vide, que les enfants découpent exactement le texte de leur parent et qu'aucun élément du document n'appartient à deux parents. Des références valides ne suffisent pas à garantir une interprétation correcte : le contrôle de soutien vérifie qu'un extrait cité figure bien dans la source, pas que la conclusion est juste.
 
 Les figures accompagnent les parents retenus, mais ne sont pas indexées par leurs pixels. RRF favorise l'accord entre moteurs et ne garantit pas que les parents choisis suffisent. Le routeur peut se tromper de branche ou de budget ; tester ses décisions sur ses propres questions. Les liens indiquent la section ou l'objet et les pages ; ils ne prouvent pas que chaque affirmation est exacte. Pour un PDF local, la citation ouvre sa copie locale, pas une URL publique.
 
-Cette première version est prévue pour un utilisateur local, des PDF numériques et une ingestion à la fois. Elle n'inclut ni serveur, ni base vectorielle distante, ni reranker. Aucun document source ni clé privée n'est publié dans ce dépôt.
+Cette première version est prévue pour un utilisateur local, des PDF numériques et une ingestion à la fois. Elle n'inclut ni serveur ni base vectorielle distante. Le reranker est facultatif et se télécharge à part. Aucun document source ni clé privée n'est publié dans ce dépôt.
 
 ## Références
 
