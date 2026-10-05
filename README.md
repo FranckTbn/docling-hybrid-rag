@@ -197,6 +197,41 @@ Avec RRF, le bon document est toujours parmi les trois premiers parents, la bonn
 
 Limites : dix documents sans distracteurs rendent la recherche de document facile ; les questions sont écrites par un LLM d'après chaque section, donc plus proches du texte qu'une vraie demande ; la mesure ne juge ni la réponse du modèle ni les citations. `RAG_BENCHMARK_DIR=data/benchmarks/open-rag-bench-arxiv python -m unittest tests.test_open_rag_bench` vérifie que ces planchers tiennent après une modification.
 
+### ViDoRe V3 : comparaison aux systèmes publiés
+
+[ViDoRe V3](https://arxiv.org/abs/2601.08620) (ILLUIN Technology et NVIDIA, 2026, [jeux de données](https://huggingface.co/collections/vidore/vidore-benchmark-v3), CC BY 4.0) mesure la recherche de pages dans des documents d'entreprise réels, fournis en PDF, avec des pages pertinentes notées par des annotateurs. Son score est le nDCG@10, et son classement est tenu à jour sur le tableau MTEB. Le jeu **H.R.** compte 14 rapports de la Commission européenne, 1 110 pages et 318 questions en anglais.
+
+```python
+from pathlib import Path
+from docling_hybrid_rag.benchmarks import vidore_v3
+
+DATA = Path("data/benchmarks/vidore-v3")
+vidore_v3.download("hr", DATA)          # PDF, questions, notes de pertinence, à une révision figée du jeu
+vidore_v3.baseline_bm25("hr", DATA)     # vérifie le protocole : BM25 sur le texte fourni, 49,6 comme dans l'article de ViDoRe V3
+vidore_v3.ingest("hr", DATA)            # long : environ six heures sur un portable de 8 Go sans carte graphique
+results = vidore_v3.evaluate("hr", DATA, output=DATA / "hr" / "results.json")
+```
+
+Chaque enfant connaît ses pages : le classement des enfants devient un classement de pages (une page prend le rang de son meilleur enfant), et la fusion RRF se fait sur les pages. Résultats sur H.R., questions anglaises, comparés aux scores publiés (tableau 9 de l'article de ViDoRe V3) :
+
+| Système | nDCG@10 | Origine |
+|---|---:|---|
+| ColEmbed-3B-v2 (images) | 65,4 | publié |
+| Jina-v4 (images) | 64,6 | publié |
+| Jina-v4 (texte) | 58,8 | publié |
+| **docling-hybrid-rag, fusion RRF** | **54,1** (50,6 à 57,5) | mesuré ici |
+| ColPali (images) | 53,3 | publié |
+| LFM2-ColBERT-350M (texte) | 53,2 | publié |
+| Qwen3-Embedding-8B (texte) | 52,3 | publié |
+| BM25S (texte) | 49,6 | publié |
+| docling-hybrid-rag, dense BGE-M3 | 49,3 (45,7 à 52,8) | mesuré ici |
+| docling-hybrid-rag, BM25 | 48,2 (44,8 à 51,7) | mesuré ici |
+| BGE-M3 (texte) | 45,3 | publié |
+
+La fusion gagne 4,8 points sur le dense (intervalle de 2,9 à 6,8) et 5,9 points sur BM25 (3,6 à 8,1) : écarts mesurés question par question, donc plus précis que la comparaison des intervalles. Le dense et BM25 ne se distinguent pas. Le contexte que recevrait le modèle (trois parents de section, environ 3 500 tokens, 6,6 pages) contient 49 % des pages pertinentes pondérées par leur note.
+
+Limites : un seul des huit jeux publics, en anglais ; le texte vient de l'extraction de Docling, celui des auteurs d'une autre extraction, donc les écarts mêlent modèle, extraction et découpage ; le reranker n'est pas mesuré, alors que le meilleur système textuel publié en utilise un ; les scores publiés n'ont pas d'intervalle ; la mesure porte sur la recherche de pages, pas sur la qualité des réponses. Les jeux français (`physics`, `energy`, `finance_fr`) s'ingèrent de la même façon avec `vidore_v3.ingest(jeu, DATA, isolated=True)`.
+
 ## Correspondance avec l'article
 
 | Partie de l'article | Code du dépôt |

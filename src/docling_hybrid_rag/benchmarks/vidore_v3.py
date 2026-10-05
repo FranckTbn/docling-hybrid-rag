@@ -20,6 +20,8 @@ Chaque étape reprend où elle s'est arrêtée. Les fichiers vont dans `--data-d
 
 import argparse
 import json
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -115,8 +117,12 @@ def load_queries(target: Path, dataset: str) -> list[dict]:
 
 
 def ingest(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, *, pdf_options=None,
-           only: list[str] | None = None) -> None:
-    """Parser, découper et indexer chaque PDF du jeu (le titre de chaque document est son identifiant)."""
+           only: list[str] | None = None, isolated: bool = False) -> None:
+    """Parser, découper et indexer chaque PDF du jeu (le titre de chaque document est son identifiant).
+
+    `isolated=True` donne un processus à chaque PDF : Docling garde des modèles en mémoire d'un document à
+    l'autre, et un jeu de plusieurs dizaines de PDF finit par manquer de RAM dans un processus unique.
+    """
     from docling_hybrid_rag import ingest_document
 
     target = dataset_dir(data_dir, dataset)
@@ -126,6 +132,13 @@ def ingest(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, *, p
     done = {json.loads(line)["document"] for line in log.read_text(encoding="utf-8").splitlines()} if log.exists() else set()
     for document, pdf in sorted(documents.items()):
         if (only and document not in only) or document in done:
+            continue
+        if isolated:
+            command = [sys.executable, "-m", "docling_hybrid_rag.benchmarks.vidore_v3", "ingest", "--dataset", dataset,
+                       "--data-dir", str(data_dir), "--only", document]
+            if knowledge_dir != target / "knowledge":
+                command += ["--knowledge-dir", str(knowledge_dir)]
+            subprocess.run(command, check=False)  # un échec laisse le document à refaire au passage suivant
             continue
         started = time.perf_counter()
         record = ingest_document(pdf, knowledge_dir, title=document, pdf_options=pdf_options,
@@ -186,6 +199,26 @@ def summarize(rows: list[dict]) -> dict:
     return summary
 
 
+def paired_differences(rows: dict[str, list[dict]], key: str = "ndcg@10") -> dict:
+    """Écart de nDCG@10 entre deux moteurs, question par question, avec son intervalle à 95 %.
+
+    Comparer deux intervalles qui se recouvrent ne dit rien d'un écart entre moteurs mesurés sur les mêmes
+    questions : la différence question par question est plus précise. En points de nDCG (sur 100).
+    """
+    from statistics import mean
+
+    from docling_hybrid_rag.passage_evaluation import bootstrap_interval
+
+    by_query = {variant: {row["query_id"]: row[key] for row in items} for variant, items in rows.items()}
+    result = {}
+    for better, other in (("rrf", "dense"), ("rrf", "bm25"), ("dense", "bm25")):
+        differences = [100 * (by_query[better][q] - by_query[other][q]) for q in by_query[better]]
+        low, high = bootstrap_interval(differences)
+        result[f"{better} moins {other}"] = {"mean": mean(differences), "low": low, "high": high,
+                                              "significatif": low > 0 or high < 0}
+    return result
+
+
 def comparison(dataset: str, ours: dict[str, float]) -> list[dict]:
     """Nos scores et les scores publiés de la même colonne, du meilleur au moins bon."""
     spec = DATASETS[dataset]
@@ -232,6 +265,7 @@ def evaluate(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, ou
         "partial": partial,
         "variants": {variant: summarize(measured["variants"][variant]) for variant in VARIANTS},
         "context": summarize(measured["context"]),
+        "paired_differences": paired_differences(measured["variants"]),
     }
     by_type: dict[str, dict] = {}
     for kind in sorted({t for q in queries for t in q["query_types"]}):
@@ -255,13 +289,14 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=Path("data/benchmarks/vidore-v3"))
     parser.add_argument("--knowledge-dir", type=Path, default=None)
     parser.add_argument("--only", nargs="*", default=None, help="documents à ingérer (essai court)")
+    parser.add_argument("--isolated", action="store_true", help="un processus par PDF (jeux de plusieurs dizaines de PDF)")
     args = parser.parse_args()
     if args.stage == "download":
         print(download(args.dataset, args.data_dir))
     elif args.stage == "baseline":
         print(json.dumps(baseline_bm25(args.dataset, args.data_dir)))
     elif args.stage == "ingest":
-        ingest(args.dataset, args.data_dir, args.knowledge_dir, only=args.only)
+        ingest(args.dataset, args.data_dir, args.knowledge_dir, only=args.only, isolated=args.isolated)
     elif args.stage == "status":
         ready, total = status(args.dataset, args.data_dir, args.knowledge_dir)
         print(f"{ready}/{total} documents ingérés")
