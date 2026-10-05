@@ -25,8 +25,8 @@ def decision(route, budget=3, question="Question autonome", sub_questions=None):
             "sub_questions": sub_questions or [question], "reason": "Motif simulé."}
 
 
-def supported(paragraphs):
-    return {"checks": [{"paragraph": number, "verdict": "soutenu", "problem": ""}
+def supported(paragraphs, quote="A"):
+    return {"checks": [{"paragraph": number, "verdict": "soutenu", "quote": quote, "problem": ""}
                        for number in range(1, paragraphs + 1)], "alerts": [], "suggestions": []}
 
 
@@ -173,8 +173,9 @@ class WorkflowTests(unittest.TestCase):
         answer = SourcedAnswer(paragraphs=[{"text": "Mack donne une variance.", "source_ids": ["s1"]},
                                            {"text": "Chain-Ladder utilise des facteurs.", "source_ids": ["s2"]}],
                                missing_information="")
-        report = {"checks": [{"paragraph": 1, "verdict": "partiel", "problem": "La source parle d'erreur quadratique, pas de variance."},
-                             {"paragraph": 2, "verdict": "soutenu", "problem": ""}],
+        report = {"checks": [{"paragraph": 1, "verdict": "partiel", "quote": "La MSEP est une erreur quadratique moyenne.",
+                              "problem": "La source parle d'erreur quadratique, pas de variance."},
+                             {"paragraph": 2, "verdict": "soutenu", "quote": "Facteurs de développement.", "problem": ""}],
                   "alerts": [], "suggestions": ["Relire la définition de la MSEP page 12."]}
         llm = ScriptedLLM([decision("retrieve")], reports=[report])
         result, *_ = self.run_retrieval(llm, "Question", search=lambda *a, **k: search_result(["p1"]),
@@ -193,6 +194,42 @@ class WorkflowTests(unittest.TestCase):
         sources = {"s": {"name": "Section", "pages": [1], "text": "A et B"}}
         report = check_support("Q", answer, sources, llm=ScriptedLLM([], reports=[supported(1)]))
         self.assertEqual(report.alerts, ["Le contrôle n'a pas évalué le paragraphe 2."])
+
+    def test_a_supported_verdict_needs_a_quote_found_in_the_cited_sources(self):
+        sources = {"s": {"name": "Section", "pages": [1], "text": "La MSEP est une erreur quadratique moyenne de prédiction."}}
+        answer = SourcedAnswer(paragraphs=[{"text": "La MSEP est une variance.", "source_ids": ["s"]}], missing_information="")
+
+        def verdict(quote):
+            report = {"checks": [{"paragraph": 1, "verdict": "soutenu", "quote": quote, "problem": ""}],
+                      "alerts": [], "suggestions": []}
+            return check_support("Q", answer, sources, llm=ScriptedLLM([], reports=[report])).checks[0]
+
+        # Une citation exacte, même mise en forme autrement, garde le verdict.
+        self.assertEqual(verdict("la MSEP est une  erreur quadratique moyenne").verdict, "soutenu")
+        # Une phrase que les sources ne contiennent pas est rétrogradée avec une explication.
+        invented = verdict("La MSEP est une variance.")
+        self.assertEqual(invented.verdict, "partiel")
+        self.assertIn("ne figure pas dans les sources", invented.problem)
+        self.assertEqual(verdict("").verdict, "partiel")
+
+    def test_a_quote_joining_two_real_sentences_is_kept_but_an_invented_one_is_not(self):
+        sources = {"s": {"name": "Lexique", "pages": [1], "text":
+                         "Ces provisions couvrent l'insuffisance de provisionnement des sinistres déclarés (IBNeR). "
+                         "| Composée des provisions D/D et des provisions pour sinistres tardifs (IBNR). |"}}
+        answer = SourcedAnswer(paragraphs=[{"text": "A", "source_ids": ["s"]}], missing_information="")
+
+        def verdict(quote):
+            report = {"checks": [{"paragraph": 1, "verdict": "soutenu", "quote": quote, "problem": ""}],
+                      "alerts": [], "suggestions": []}
+            return check_support("Q", answer, sources, llm=ScriptedLLM([], reports=[report])).checks[0].verdict
+
+        spliced = ("Ces provisions couvrent l'insuffisance de provisionnement des sinistres déclarés (IBNeR). "
+                   "Composée des provisions D/D et des provisions pour sinistres tardifs (IBNR).")
+        self.assertEqual(verdict(spliced), "soutenu")
+        self.assertEqual(verdict("Ces provisions couvrent l'insuffisance de provisionnement des sinistres déclarés (IBNeR) … "
+                                 "Composée des provisions D/D et des provisions pour sinistres tardifs (IBNR)."), "soutenu")
+        invented = spliced + " Le taux d'actualisation est de 3 % par an."
+        self.assertEqual(verdict(invented), "partiel")
 
     def test_themes_are_reset_between_turns(self):
         llm = ScriptedLLM([decision("retrieve", 3, "Q1", ["Q1a", "Q1b"]), decision("retrieve", 3, "Q2")])
