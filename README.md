@@ -147,26 +147,34 @@ context = build_context(hits["parent_ids"], base)
 
 BM25 est construit pendant l'ingestion sur les enfants de toute la base, avec les mots courants français ignorés et une racinisation française (« provisions » retrouve « provision »), puis sauvegardé. Le texte d'un enfant contient les titres de sa section. Les deux index sont rechargés sans réencodage ; seule une nouvelle question est encodée. Les vingt enfants candidats de chaque canal sont ramenés à des parents distincts avant RRF (constante 60) ; chaque parent garde son meilleur enfant dans chaque canal. L'appel direct à `hybrid_retrieval` garde par défaut trois parents, avec toutes leurs figures conservées. Dans le workflow, le LLM transmet son choix de 3, 5 ou 7 via `context_k`.
 
-## Mesure sur dix PDF réels
+## Mesurer la recherche sur des benchmarks publics
 
-La méthode est mesurée sur [Open RAG Benchmark](https://huggingface.co/datasets/vectara/open_ragbench) de Vectara : des articles arXiv au format PDF, des questions rédigées d'après une section précise, et la section attendue pour chacune (licence CC BY-NC 4.0, usage non commercial : les données ne sont pas dans ce dépôt). Dix articles de 8 à 24 pages, cent questions dont 45 portent sur du texte seul et 55 sur des tableaux ou des figures, sont ingérés dans une même base de 649 enfants.
+Deux benchmarks sont intégrés au package (`pip install "docling-hybrid-rag[benchmarks] @ git+https://github.com/FranckTbn/docling-hybrid-rag.git"`). Chaque exécution enregistre les versions qui l'ont produite, et chaque jeu est téléchargé à une révision figée : les mêmes fichiers, donc les mêmes chiffres.
 
-```bash
-python -m docling_hybrid_rag.benchmarks.open_rag_bench download   # questions, sections attendues, PDF (pause entre deux requêtes arXiv)
-python -m docling_hybrid_rag.benchmarks.open_rag_bench ingest     # parse, découpe et indexe les dix PDF
-python -m docling_hybrid_rag.benchmarks.open_rag_bench evaluate   # BM25, dense, RRF, avec la portée des parents « section » puis « elements »
+### Open RAG Benchmark : dix articles arXiv
+
+[Open RAG Benchmark](https://huggingface.co/datasets/vectara/open_ragbench) de Vectara : des articles arXiv au format PDF, des questions rédigées d'après une section précise, et la section attendue pour chacune (licence CC BY-NC 4.0, usage non commercial : les données ne sont pas dans ce dépôt). Dix articles de 8 à 24 pages, cent questions dont 45 sur du texte seul et 55 sur des tableaux ou des figures, dans une même base de 649 enfants (BM25 en anglais).
+
+```python
+from pathlib import Path
+from docling_hybrid_rag.benchmarks import open_rag_bench
+
+DATA = Path("data/benchmarks/open-rag-bench-arxiv")
+open_rag_bench.download(DATA)           # questions, sections attendues et PDF, pause entre deux requêtes arXiv
+open_rag_bench.ingest(DATA)             # parse, découpe et indexe les dix PDF
+results = open_rag_bench.evaluate(DATA) # BM25, dense, RRF, avec parents « section » puis « elements »
 ```
 
-Un parent est jugé pertinent s'il partage assez de suites de quatre mots avec la section attendue : la mesure ne dépend pas du parsing. Les intervalles sont à 95 %, par rééchantillonnage des cent questions.
+Un parent est pertinent s'il partage assez de suites de quatre mots avec la section attendue : la mesure ne dépend pas du parsing. Les intervalles sont à 95 %, par rééchantillonnage des cent questions.
 
 | Parents (3 premiers) | Section attendue retrouvée | Part de la section dans le contexte | Taille du contexte |
 |---|---|---|---|
-| Sections (192 parents) | 0,87 [0,80 à 0,93] | 0,67 [0,61 à 0,73] | 3 400 tokens |
-| Éléments (522 parents) | 0,86 [0,79 à 0,93] | 0,42 [0,36 à 0,48] | 1 150 tokens |
+| Sections (192 parents) | 0,92 [0,86 à 0,97] | 0,71 [0,65 à 0,76] | 3 400 tokens |
+| Éléments (522 parents) | 0,87 [0,80 à 0,93] | 0,43 [0,37 à 0,49] | 1 200 tokens |
 
-Avec RRF, le bon document est toujours parmi les trois premiers parents et la bonne section l'est dans 87 % des cas (95 % parmi les cinq premiers). BM25 et le dense seuls obtiennent des résultats voisins, et leur fusion RRF est au même niveau ou un peu au-dessus : avec cent questions, les intervalles se recouvrent et aucun moteur ne se détache. Le reranker, passé sur les 50 premières questions, ne change rien de mesurable : à 50 questions, 0,70 contre 0,66 pour RRF seul en premier rang et 0,84 contre 0,82 parmi les trois premiers, dans des intervalles d'environ dix points. Sur CPU, il coûte environ une minute par question. Les parents « section » ne retrouvent pas plus souvent la section, mais ils mettent beaucoup plus de son contenu sous les yeux du modèle, surtout quand la question porte sur un tableau ou une figure voisins du passage (part couverte 0,56 contre 0,22 pour les questions texte, tableau et figure). Ce contexte coûte environ trois fois plus de tokens.
+Avec RRF, le bon document est toujours parmi les trois premiers parents, la bonne section l'est dans 92 % des cas, et dans 96 % parmi les cinq premiers. BM25 seul (0,89) et le dense seul (0,86) restent dans les intervalles de la fusion. Les parents « section » mettent beaucoup plus du contenu attendu sous les yeux du modèle, surtout quand la question porte sur un tableau ou une figure voisins du passage (part couverte 0,60 contre 0,24 pour les questions texte, tableau et figure), pour environ trois fois plus de tokens.
 
-Limites : dix documents sans documents voisins en distracteurs rendent la recherche de document facile ; les questions sont écrites par un LLM d'après chaque section, donc plus proches du texte qu'une vraie demande ; la mesure ne juge ni la réponse du modèle ni les citations. Lancer `RAG_BENCHMARK_DIR=data/benchmarks/open-rag-bench-arxiv python -m unittest tests.test_open_rag_bench` vérifie que ces planchers tiennent après une modification.
+Limites : dix documents sans distracteurs rendent la recherche de document facile ; les questions sont écrites par un LLM d'après chaque section, donc plus proches du texte qu'une vraie demande ; la mesure ne juge ni la réponse du modèle ni les citations. `RAG_BENCHMARK_DIR=data/benchmarks/open-rag-bench-arxiv python -m unittest tests.test_open_rag_bench` vérifie que ces planchers tiennent après une modification.
 
 ## Correspondance avec l'article
 

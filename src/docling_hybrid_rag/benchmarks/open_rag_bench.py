@@ -36,7 +36,7 @@ def fetch(url: str, target: Path) -> None:
         target.write_bytes(response.read())
 
 
-def download(data_dir: Path, documents: list[str]) -> None:
+def download(data_dir: Path, documents: list[str] = DOCUMENTS) -> None:
     for name in ("queries", "qrels", "answers", "pdf_urls"):
         fetch(f"{HF}/{name}.json", data_dir / f"{name}.json")
     urls = json.loads((data_dir / "pdf_urls.json").read_text(encoding="utf-8"))
@@ -65,9 +65,12 @@ def light_options():
     return options
 
 
-def ingest(data_dir: Path, knowledge_dir: Path, documents: list[str], scope: str) -> None:
+def ingest(data_dir: Path, knowledge_dir: Path | None = None, documents: list[str] = DOCUMENTS,
+           scope: str = "section") -> None:
     from docling_hybrid_rag import ingest_document
 
+    data_dir = Path(data_dir)
+    knowledge_dir = knowledge_dir or data_dir / "knowledge"
     for document in documents:
         started = time.perf_counter()
         record = ingest_document(data_dir / "pdfs" / f"{document}.pdf", knowledge_dir, title=document,
@@ -106,8 +109,9 @@ def print_summary(label: str, variant: str, summary: dict) -> None:
           f"couverture@3 {summary['coverage@3']['mean']:.2f} | tokens@3 {summary['tokens@3']['mean']:.0f}", flush=True)
 
 
-def evaluate(data_dir: Path, knowledge_dir: Path, documents: list[str], scopes: list[str],
-             reranker_questions: int, output: Path) -> None:
+def evaluate(data_dir: Path, knowledge_dir: Path | None = None, documents: list[str] = DOCUMENTS,
+             scopes: tuple[str, ...] = ("section", "elements"), reranker_questions: int = 0,
+             output: Path | None = None) -> dict:
     from docling_hybrid_rag import load_knowledge_base
     from docling_hybrid_rag.passage_evaluation import (
         evaluate_ranking, overlaps, rank_all_variants, shingles, summarize, with_parent_scope,
@@ -115,6 +119,9 @@ def evaluate(data_dir: Path, knowledge_dir: Path, documents: list[str], scopes: 
     from docling_hybrid_rag.retrieval import encode_question
     from docling_hybrid_rag.settings import get_reranker
 
+    data_dir = Path(data_dir)
+    knowledge_dir = knowledge_dir or data_dir / "knowledge"
+    output = output or data_dir / "results.json"
     knowledge = load_knowledge_base(knowledge_dir)
     cases = build_cases(data_dir, documents)
     child_shingles = [(c.metadata["document_title"], shingles(c.metadata["raw_text"])) for c in knowledge.children]
@@ -152,15 +159,16 @@ def evaluate(data_dir: Path, knowledge_dir: Path, documents: list[str], scopes: 
             results["scopes"][scope]["paired"] = paired
             for variant, summary in paired.items():
                 print_summary(f"{scope}, mêmes {reranker_questions} questions", variant, summary)
-    output.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+    Path(output).write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"résultats dans {output}", flush=True)
+    return results
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("stage", choices=["download", "ingest", "evaluate"])
     parser.add_argument("--data-dir", type=Path, default=Path("data/benchmarks/open-rag-bench-arxiv"))
-    parser.add_argument("--knowledge-dir", type=Path, default=Path("data/benchmarks/open-rag-bench-arxiv/knowledge"))
+    parser.add_argument("--knowledge-dir", type=Path, default=None)
     parser.add_argument("--documents", nargs="*", default=DOCUMENTS)
     parser.add_argument("--parent-scope", choices=["section", "elements"], default="section")
     parser.add_argument("--scopes", nargs="*", default=["section", "elements"], help="portées comparées par `evaluate`")
@@ -172,8 +180,7 @@ def main() -> None:
     elif args.stage == "ingest":
         ingest(args.data_dir, args.knowledge_dir, args.documents, args.parent_scope)
     else:
-        output = args.output or args.data_dir / "results.json"
-        evaluate(args.data_dir, args.knowledge_dir, args.documents, args.scopes, args.reranker_questions, output)
+        evaluate(args.data_dir, args.knowledge_dir, args.documents, args.scopes, args.reranker_questions, args.output)
 
 
 if __name__ == "__main__":

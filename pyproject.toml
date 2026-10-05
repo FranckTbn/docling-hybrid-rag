@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "docling-hybrid-rag"
-version = "0.3.0"
+version = "0.4.0"
 description = "RAG documentaire : Docling, parents/enfants, BM25, BGE-M3, RRF et réponse sourcée."
 readme = "README.md"
 license = "MIT"

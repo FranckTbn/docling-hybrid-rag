@@ -185,8 +185,13 @@ def comparison(dataset: str, ours: dict[str, float]) -> list[dict]:
     return sorted(rows, key=lambda row: -row["ndcg@10"])
 
 
-def evaluate(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, output: Path | None = None) -> dict:
-    """Mesurer BM25, dense et RRF au niveau des pages, puis le contexte que recevrait le modèle."""
+def evaluate(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, output: Path | None = None, *,
+             partial: bool = False) -> dict:
+    """Mesurer BM25, dense et RRF au niveau des pages, puis le contexte que recevrait le modèle.
+
+    Tous les PDF du jeu doivent être ingérés : sur un corpus plus petit, le score ne serait plus comparable
+    à ceux publiés. `partial=True` ne sert qu'à un essai de la chaîne sur quelques documents.
+    """
     from docling_hybrid_rag import load_knowledge_base
     from docling_hybrid_rag.benchmarks import environment
     from docling_hybrid_rag.page_evaluation import VARIANTS, evaluate_queries
@@ -196,9 +201,13 @@ def evaluate(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, ou
     knowledge = load_knowledge_base(knowledge_dir or target / "knowledge")
     ingested = {record["title"] for record in knowledge.records.values()}
     missing = set(load_documents(target)) - ingested
-    if missing:
+    if missing and not partial:
         raise ValueError(f"{len(missing)} PDF ne sont pas ingérés (étape ingest) : le score ne serait pas comparable.")
     queries = load_queries(target, dataset)
+    if partial:
+        for query in queries:
+            query["relevance"] = {page: note for page, note in query["relevance"].items() if page[0] in ingested}
+        queries = [query for query in queries if query["relevance"]]
     vectors = {query["query_id"]: encode_question(query["question"], knowledge) for query in queries}
     measured = evaluate_queries(knowledge, queries, vectors)
     spec = DATASETS[dataset]
@@ -209,6 +218,7 @@ def evaluate(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, ou
                     "documents": len(ingested),
                     "pages": len(_parquet(next((target / "corpus").glob("test-*.parquet")), ["corpus_id"])),
                     "children": len(knowledge.children), "parents": len(knowledge.parents)},
+        "partial": partial,
         "variants": {variant: summarize(measured["variants"][variant]) for variant in VARIANTS},
         "context": summarize(measured["context"]),
     }
@@ -217,6 +227,9 @@ def evaluate(dataset: str, data_dir: Path, knowledge_dir: Path | None = None, ou
         ids = {q["query_id"] for q in queries if kind in q["query_types"]}
         by_type[kind] = summarize([r for r in measured["variants"]["rrf"] if r["query_id"] in ids])
     results["rrf_by_query_type"] = by_type
+    # Vérification du protocole : le BM25 sur le texte fourni doit retrouver le BM25S publié.
+    published = PUBLISHED["english" if spec["language"] == "en" else "french"]["BM25S (texte)"][spec["column"]]
+    results["protocol_check"] = {**baseline_bm25(dataset, data_dir), "published_bm25s_ndcg@10": published}
     ours = {f"docling-hybrid-rag, {name}": 100 * results["variants"][name]["ndcg@10"]["mean"] for name in VARIANTS}
     results["comparison"] = comparison(dataset, ours)
     if output:
